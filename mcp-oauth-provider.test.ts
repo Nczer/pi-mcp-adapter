@@ -13,8 +13,8 @@ import { randomBytes } from "crypto"
 const TEST_DIR = join(tmpdir(), `mcp-oauth-test-${randomBytes(4).toString('hex')}`)
 process.env.MCP_OAUTH_DIR = TEST_DIR
 
-import { McpOAuthProvider } from "./mcp-oauth-provider.js"
-import { saveAuthEntry, updateOAuthState } from "./mcp-auth.js"
+import { McpOAuthProvider } from "./mcp-oauth-provider.ts"
+import { getAuthForUrl, saveAuthEntry, updateOAuthState } from "./mcp-auth.ts"
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js"
 import type { OAuthClientInformationFull, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js"
 
@@ -171,6 +171,7 @@ describe("McpOAuthProvider", () => {
       const info: OAuthClientInformationFull = {
         client_id: "new-client",
         client_secret: "new-secret",
+        redirect_uris: ["http://localhost:3118/callback"],
         client_id_issued_at: Math.floor(Date.now() / 1000),
         client_secret_expires_at: futureTime,
       }
@@ -241,7 +242,7 @@ describe("McpOAuthProvider", () => {
           redirectCaptured = url
         },
       })
-      await updateOAuthState("redirect-with-state", "state-abc")
+      await updateOAuthState("redirect-with-state", "state-abc", serverUrl)
       const testUrl = new URL("https://example.com/auth")
 
       await provider.redirectToAuthorization(testUrl)
@@ -259,6 +260,25 @@ describe("McpOAuthProvider", () => {
         (err: unknown) => err instanceof UnauthorizedError && /Re-authentication required/.test((err as Error).message),
       )
     })
+
+    it("should ignore OAuth state saved for a different server URL before redirecting", async () => {
+      let redirected = false
+      const provider = new McpOAuthProvider("redirect-url-bound", serverUrl, {}, {
+        onRedirect: async () => {
+          redirected = true
+        },
+      })
+      saveAuthEntry("redirect-url-bound", {
+        oauthState: "stale-state",
+        serverUrl: "https://different.example.com",
+      }, "https://different.example.com")
+
+      await assert.rejects(
+        async () => provider.redirectToAuthorization(new URL("https://example.com/auth")),
+        (err: unknown) => err instanceof UnauthorizedError && /Re-authentication required/.test((err as Error).message),
+      )
+      assert.strictEqual(redirected, false)
+    })
   })
 
   describe("codeVerifier / saveCodeVerifier", () => {
@@ -271,12 +291,28 @@ describe("McpOAuthProvider", () => {
 
       const verifier = await provider.codeVerifier()
       assert.strictEqual(verifier, "verifier-abc-123")
+      assert.strictEqual(getAuthForUrl("code-verifier-test", serverUrl)?.codeVerifier, "verifier-abc-123")
     })
 
     it("should throw when no code verifier", async () => {
       const provider = new McpOAuthProvider("code-verifier-throw", serverUrl, {}, {
         onRedirect: async () => {},
       })
+
+      await assert.rejects(
+        async () => provider.codeVerifier(),
+        /No code verifier saved/
+      )
+    })
+
+    it("should ignore code verifiers saved for a different server URL", async () => {
+      const provider = new McpOAuthProvider("code-verifier-url-bound", serverUrl, {}, {
+        onRedirect: async () => {},
+      })
+      saveAuthEntry("code-verifier-url-bound", {
+        codeVerifier: "stale-verifier",
+        serverUrl: "https://different.example.com",
+      }, "https://different.example.com")
 
       await assert.rejects(
         async () => provider.codeVerifier(),
@@ -295,12 +331,28 @@ describe("McpOAuthProvider", () => {
 
       const state = await provider.state()
       assert.strictEqual(state, "state-xyz-789")
+      assert.strictEqual(getAuthForUrl("state-test-save", serverUrl)?.oauthState, "state-xyz-789")
     })
 
     it("should throw UnauthorizedError when no state is saved", async () => {
       const provider = new McpOAuthProvider("state-test-throw", serverUrl, {}, {
         onRedirect: async () => {},
       })
+
+      await assert.rejects(
+        async () => provider.state(),
+        (err: unknown) => err instanceof UnauthorizedError && /Re-authentication required/.test((err as Error).message),
+      )
+    })
+
+    it("should ignore OAuth state saved for a different server URL", async () => {
+      const provider = new McpOAuthProvider("state-url-bound", serverUrl, {}, {
+        onRedirect: async () => {},
+      })
+      saveAuthEntry("state-url-bound", {
+        oauthState: "stale-state",
+        serverUrl: "https://different.example.com",
+      }, "https://different.example.com")
 
       await assert.rejects(
         async () => provider.state(),

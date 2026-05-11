@@ -7,11 +7,11 @@ import type {
   CallToolRequest,
   CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
-import type { ConsentManager } from "./consent-manager.js";
-import { ServerError, wrapError } from "./errors.js";
-import { buildHostHtmlTemplate, buildCspMetaContent, applyCspMeta } from "./host-html-template.js";
-import { logger } from "./logger.js";
-import type { McpServerManager } from "./server-manager.js";
+import type { ConsentManager } from "./consent-manager.ts";
+import { ServerError, wrapError } from "./errors.ts";
+import { buildHostHtmlTemplate, buildCspMetaContent, applyCspMeta } from "./host-html-template.ts";
+import { logger } from "./logger.ts";
+import type { McpServerManager } from "./server-manager.ts";
 import {
   extractUiPromptText,
   getVisualizationStreamEnvelope,
@@ -27,7 +27,7 @@ import {
   type UiResourceContent,
   type UiSessionMessages,
   type UiStreamSummary,
-} from "./types.js";
+} from "./types.ts";
 
 const MAX_BODY_SIZE = 2 * 1024 * 1024;
 const ABANDONED_GRACE_MS = 60_000;

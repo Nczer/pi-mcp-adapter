@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Api, Model } from "@mariozechner/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import type { CreateMessageRequest, ModelPreferences } from "@modelcontextprotocol/sdk/types.js";
 import type { SamplingHandlerOptions } from "../sampling-handler.ts";
 
@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
   complete: vi.fn(),
 }));
 
-vi.mock("@mariozechner/pi-ai", () => ({
+vi.mock("@earendil-works/pi-ai", () => ({
   complete: mocks.complete,
 }));
 

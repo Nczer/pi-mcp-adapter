@@ -1,5 +1,5 @@
-import { ConsentError } from "./errors.js";
-import { logger } from "./logger.js";
+import { ConsentError } from "./errors.ts";
+import { logger } from "./logger.ts";
 
 export type ToolConsentMode = "never" | "once-per-server" | "always";
 

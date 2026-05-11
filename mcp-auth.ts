@@ -11,7 +11,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'fs';
 import { join } from 'path';
-import { getAgentPath } from './agent-dir.js';
+import { getAgentPath } from './agent-dir.ts';
 
 /** OAuth token storage format */
 export interface StoredTokens {
@@ -163,6 +163,11 @@ export function updateTokens(
   serverUrl?: string
 ): void {
   const entry = getAuthEntry(serverName) ?? {};
+  if (serverUrl && entry.serverUrl !== serverUrl) {
+    delete entry.clientInfo;
+    delete entry.codeVerifier;
+    delete entry.oauthState;
+  }
   entry.tokens = tokens;
   saveAuthEntry(serverName, entry, serverUrl);
 }
@@ -176,6 +181,11 @@ export function updateClientInfo(
   serverUrl?: string
 ): void {
   const entry = getAuthEntry(serverName) ?? {};
+  if (serverUrl && entry.serverUrl !== serverUrl) {
+    delete entry.tokens;
+    delete entry.codeVerifier;
+    delete entry.oauthState;
+  }
   entry.clientInfo = clientInfo;
   saveAuthEntry(serverName, entry, serverUrl);
 }
@@ -183,10 +193,15 @@ export function updateClientInfo(
 /**
  * Update code verifier for a server.
  */
-export function updateCodeVerifier(serverName: string, codeVerifier: string): void {
+export function updateCodeVerifier(serverName: string, codeVerifier: string, serverUrl?: string): void {
   const entry = getAuthEntry(serverName) ?? {};
+  if (serverUrl && entry.serverUrl !== serverUrl) {
+    delete entry.tokens;
+    delete entry.clientInfo;
+    delete entry.oauthState;
+  }
   entry.codeVerifier = codeVerifier;
-  saveAuthEntry(serverName, entry);
+  saveAuthEntry(serverName, entry, serverUrl);
 }
 
 /**
@@ -203,10 +218,15 @@ export function clearCodeVerifier(serverName: string): void {
 /**
  * Update OAuth state for a server.
  */
-export function updateOAuthState(serverName: string, state: string): void {
+export function updateOAuthState(serverName: string, state: string, serverUrl?: string): void {
   const entry = getAuthEntry(serverName) ?? {};
+  if (serverUrl && entry.serverUrl !== serverUrl) {
+    delete entry.tokens;
+    delete entry.clientInfo;
+    delete entry.codeVerifier;
+  }
   entry.oauthState = state;
-  saveAuthEntry(serverName, entry);
+  saveAuthEntry(serverName, entry, serverUrl);
 }
 
 /**

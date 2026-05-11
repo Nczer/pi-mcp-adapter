@@ -1,16 +1,16 @@
-import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
-import type { McpExtensionState } from "./state.js";
-import type { DirectToolSpec, McpConfig, McpContent } from "./types.js";
-import type { MetadataCache } from "./metadata-cache.js";
-import { lazyConnect, getFailureAgeSeconds } from "./init.js";
-import { isServerCacheValid } from "./metadata-cache.js";
-import { formatSchema } from "./tool-metadata.js";
-import { transformMcpContent } from "./tool-registrar.js";
-import { maybeStartUiSession, type UiSessionRuntime } from "./ui-session.js";
-import { formatToolName, isToolExcluded } from "./types.js";
-import { resourceNameToToolName } from "./resource-tools.js";
-import { authenticate, supportsOAuth } from "./mcp-auth-flow.js";
-import { formatAuthRequiredMessage } from "./utils.js";
+import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { McpExtensionState } from "./state.ts";
+import type { DirectToolSpec, McpConfig, McpContent } from "./types.ts";
+import type { MetadataCache } from "./metadata-cache.ts";
+import { lazyConnect, getFailureAgeSeconds } from "./init.ts";
+import { isServerCacheValid } from "./metadata-cache.ts";
+import { formatSchema } from "./tool-metadata.ts";
+import { transformMcpContent } from "./tool-registrar.ts";
+import { maybeStartUiSession, type UiSessionRuntime } from "./ui-session.ts";
+import { formatToolName, isToolExcluded } from "./types.ts";
+import { resourceNameToToolName } from "./resource-tools.ts";
+import { authenticate, supportsOAuth } from "./mcp-auth-flow.ts";
+import { formatAuthRequiredMessage } from "./utils.ts";
 
 const BUILTIN_NAMES = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "mcp"]);
 
@@ -48,7 +48,7 @@ async function attemptDirectAutoAuth(
     return { status: "skipped" };
   }
 
-  const grantType = definition.oauth?.grantType ?? "authorization_code";
+  const grantType = definition.oauth ? definition.oauth.grantType ?? "authorization_code" : "authorization_code";
   if (!state.ui && grantType !== "client_credentials") {
     return {
       status: "failed",
@@ -260,7 +260,13 @@ export function buildProxyDescription(
   return desc;
 }
 
-type DirectToolExecute = ToolDefinition["execute"];
+type DirectToolExecute = (
+  toolCallId: string,
+  params: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  onUpdate: AgentToolUpdateCallback<Record<string, unknown>> | undefined,
+  ctx: ExtensionContext,
+) => Promise<AgentToolResult<Record<string, unknown>>>;
 
 export function createDirectToolExecutor(
   getState: () => McpExtensionState | null,

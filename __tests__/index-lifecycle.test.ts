@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   showTools: vi.fn(),
   reconnectServers: vi.fn(),
   authenticateServer: vi.fn(),
+  openMcpAuthPanel: vi.fn(),
   openMcpPanel: vi.fn(),
   openMcpSetup: vi.fn(),
   executeCall: vi.fn(),
@@ -29,42 +30,43 @@ const mocks = vi.hoisted(() => ({
   truncateAtWord: vi.fn((text: string) => text),
 }));
 
-vi.mock("../init.js", () => ({
+vi.mock("../init.ts", () => ({
   initializeMcp: mocks.initializeMcp,
   updateStatusBar: mocks.updateStatusBar,
   flushMetadataCache: mocks.flushMetadataCache,
 }));
 
-vi.mock("../mcp-auth-flow.js", () => ({
+vi.mock("../mcp-auth-flow.ts", () => ({
   initializeOAuth: mocks.initializeOAuth,
   shutdownOAuth: mocks.shutdownOAuth,
 }));
 
-vi.mock("../config.js", () => ({
+vi.mock("../config.ts", () => ({
   loadMcpConfig: mocks.loadMcpConfig,
 }));
 
-vi.mock("../metadata-cache.js", () => ({
+vi.mock("../metadata-cache.ts", () => ({
   loadMetadataCache: mocks.loadMetadataCache,
 }));
 
-vi.mock("../direct-tools.js", () => ({
+vi.mock("../direct-tools.ts", () => ({
   buildProxyDescription: mocks.buildProxyDescription,
   createDirectToolExecutor: mocks.createDirectToolExecutor,
   getMissingConfiguredDirectToolServers: mocks.getMissingConfiguredDirectToolServers,
   resolveDirectTools: mocks.resolveDirectTools,
 }));
 
-vi.mock("../commands.js", () => ({
+vi.mock("../commands.ts", () => ({
   showStatus: mocks.showStatus,
   showTools: mocks.showTools,
   reconnectServers: mocks.reconnectServers,
   authenticateServer: mocks.authenticateServer,
+  openMcpAuthPanel: mocks.openMcpAuthPanel,
   openMcpPanel: mocks.openMcpPanel,
   openMcpSetup: mocks.openMcpSetup,
 }));
 
-vi.mock("../proxy-modes.js", () => ({
+vi.mock("../proxy-modes.ts", () => ({
   executeCall: mocks.executeCall,
   executeConnect: mocks.executeConnect,
   executeDescribe: mocks.executeDescribe,
@@ -74,7 +76,7 @@ vi.mock("../proxy-modes.js", () => ({
   executeUiMessages: mocks.executeUiMessages,
 }));
 
-vi.mock("../utils.js", () => ({
+vi.mock("../utils.ts", () => ({
   getConfigPathFromArgv: mocks.getConfigPathFromArgv,
   truncateAtWord: mocks.truncateAtWord,
 }));
@@ -171,8 +173,14 @@ describe("mcpAdapter session lifecycle", () => {
     const { api } = createPi();
     mcpAdapter(api);
 
-    expect(api.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "demo_search" }));
-    expect(api.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "mcp" }));
+    expect(api.registerTool).toHaveBeenCalledWith(expect.objectContaining({
+      name: "demo_search",
+      renderResult: expect.any(Function),
+    }));
+    expect(api.registerTool).toHaveBeenCalledWith(expect.objectContaining({
+      name: "mcp",
+      renderResult: expect.any(Function),
+    }));
   });
 
   it("skips the proxy tool once direct tools are fully available", async () => {
@@ -195,7 +203,10 @@ describe("mcpAdapter session lifecycle", () => {
     const { api } = createPi();
     mcpAdapter(api);
 
-    expect(api.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "demo_search" }));
+    expect(api.registerTool).toHaveBeenCalledWith(expect.objectContaining({
+      name: "demo_search",
+      renderResult: expect.any(Function),
+    }));
     expect(api.registerTool).not.toHaveBeenCalledWith(expect.objectContaining({ name: "mcp" }));
   });
 
@@ -304,6 +315,63 @@ describe("mcpAdapter session lifecycle", () => {
     expect(reload).toHaveBeenCalledTimes(1);
     expect(mocks.initializeMcp).toHaveBeenCalledTimes(1);
     expect(mocks.flushMetadataCache).not.toHaveBeenCalledWith(initialState);
+  });
+
+  it("opens the auth picker for `/mcp-auth` without args in UI sessions", async () => {
+    const state = createState();
+    mocks.initializeMcp.mockResolvedValue(state);
+
+    const { default: mcpAdapter } = await import("../index.ts");
+    const { api, handlers } = createPi();
+    mcpAdapter(api);
+
+    const ui = { notify: vi.fn() };
+    const sessionStart = handlers.get("session_start");
+    await sessionStart?.({}, { hasUI: true, ui });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const commandDef = api.registerCommand.mock.calls.find((call: any[]) => call[0] === "mcp-auth")?.[1];
+    await commandDef.handler("", { hasUI: true, ui });
+
+    expect(mocks.openMcpAuthPanel).toHaveBeenCalledWith(state, api, expect.any(Object), undefined);
+    expect(mocks.authenticateServer).not.toHaveBeenCalled();
+  });
+
+  it("keeps explicit `/mcp-auth <server>` routed to direct authentication", async () => {
+    const state = createState();
+    mocks.initializeMcp.mockResolvedValue(state);
+
+    const { default: mcpAdapter } = await import("../index.ts");
+    const { api, handlers } = createPi();
+    mcpAdapter(api);
+
+    const ui = { notify: vi.fn() };
+    const sessionStart = handlers.get("session_start");
+    await sessionStart?.({}, { hasUI: true, ui });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const commandDef = api.registerCommand.mock.calls.find((call: any[]) => call[0] === "mcp-auth")?.[1];
+    await commandDef.handler("github", { hasUI: true, ui });
+
+    expect(mocks.authenticateServer).toHaveBeenCalledWith("github", state.config, expect.any(Object));
+    expect(mocks.openMcpAuthPanel).not.toHaveBeenCalled();
+  });
+
+  it("documents that no-arg `/mcp-auth` has no non-UI picker or command feedback path", async () => {
+    const state = createState();
+    mocks.initializeMcp.mockResolvedValue(state);
+
+    const { default: mcpAdapter } = await import("../index.ts");
+    const { api } = createPi();
+    mcpAdapter(api);
+
+    const commandDef = api.registerCommand.mock.calls.find((call: any[]) => call[0] === "mcp-auth")?.[1];
+    await commandDef.handler("", { hasUI: false });
+
+    expect(mocks.openMcpAuthPanel).not.toHaveBeenCalled();
+    expect(mocks.authenticateServer).not.toHaveBeenCalled();
   });
 
   it("logs initialization errors when updateStatusBar throws", async () => {

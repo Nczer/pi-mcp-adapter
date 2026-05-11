@@ -1,7 +1,7 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
-import type { McpConfig, ServerEntry } from "./types.js";
+import type { McpConfig, ServerEntry } from "./types.ts";
 
 async function execOpen(pi: ExtensionAPI, target: string, browser?: string) {
   const os = platform();

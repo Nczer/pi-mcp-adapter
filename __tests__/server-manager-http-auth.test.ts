@@ -46,7 +46,7 @@ vi.mock("@modelcontextprotocol/sdk/client/sse.js", () => ({
   SSEClientTransport: vi.fn(),
 }));
 
-vi.mock("../npx-resolver.js", () => ({
+vi.mock("../npx-resolver.ts", () => ({
   resolveNpxBinary: vi.fn(async () => null),
 }));
 

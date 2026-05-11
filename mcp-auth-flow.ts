@@ -10,24 +10,26 @@ import {
 } from "@modelcontextprotocol/sdk/client/auth.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import open from "open"
-import { McpOAuthProvider, type McpOAuthConfig } from "./mcp-oauth-provider.js"
+import { McpOAuthProvider, type McpOAuthConfig } from "./mcp-oauth-provider.ts"
 import {
   ensureCallbackServer,
   waitForCallback,
   cancelPendingCallback,
   stopCallbackServer,
-} from "./mcp-callback-server.js"
+} from "./mcp-callback-server.ts"
 import {
   getAuthForUrl,
   isTokenExpired,
   hasStoredTokens,
   clearAllCredentials,
+  clearClientInfo,
+  clearCodeVerifier,
   updateOAuthState,
   getOAuthState,
   clearOAuthState,
   type StoredTokens,
-} from "./mcp-auth.js"
-import type { ServerEntry } from "./types.js"
+} from "./mcp-auth.ts"
+import type { ServerEntry } from "./types.ts"
 
 /** Auth status for a server */
 export type AuthStatus = "authenticated" | "expired" | "not_authenticated"
@@ -74,6 +76,13 @@ export async function startAuth(
 ): Promise<{ authorizationUrl: string }> {
   const config = definition ? extractOAuthConfig(definition) : {}
 
+  const storedAuth = await getAuthForUrl(serverName, serverUrl)
+  if (storedAuth?.clientInfo && !storedAuth.tokens && !config.clientId) {
+    clearClientInfo(serverName)
+    clearCodeVerifier(serverName)
+    await clearOAuthState(serverName)
+  }
+
   if (config.grantType === "client_credentials") {
     const authProvider = new McpOAuthProvider(serverName, serverUrl, config, {
       onRedirect: async () => {
@@ -92,7 +101,7 @@ export async function startAuth(
   await ensureCallbackServer({ strictPort: Boolean(config.clientId) })
 
   const oauthState = generateState()
-  await updateOAuthState(serverName, oauthState)
+  await updateOAuthState(serverName, oauthState, serverUrl)
 
   let capturedUrl: URL | undefined
   const authProvider = new McpOAuthProvider(serverName, serverUrl, config, {

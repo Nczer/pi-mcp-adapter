@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildHostHtmlTemplate, type HostHtmlTemplateInput } from "../host-html-template.js";
+import { buildHostHtmlTemplate, type HostHtmlTemplateInput } from "../host-html-template.ts";
 
 function createMinimalInput(overrides: Partial<HostHtmlTemplateInput> = {}): HostHtmlTemplateInput {
   return {
@@ -159,7 +159,7 @@ describe("buildHostHtmlTemplate", () => {
 
   describe("CSP handling", () => {
     it("buildCspMetaContent generates correct CSP directives", async () => {
-      const { buildCspMetaContent } = await import("../host-html-template.js");
+      const { buildCspMetaContent } = await import("../host-html-template.ts");
       const csp = buildCspMetaContent({
         scriptDomains: ["'self'", "cdn.example.com"],
         styleDomains: ["'self'"],
@@ -171,7 +171,7 @@ describe("buildHostHtmlTemplate", () => {
     });
 
     it("applyCspMeta injects CSP meta into HTML head", async () => {
-      const { applyCspMeta } = await import("../host-html-template.js");
+      const { applyCspMeta } = await import("../host-html-template.ts");
       const html = applyCspMeta(
         "<html><head></head><body>Content</body></html>",
         "default-src 'none'; script-src 'self'"
@@ -182,7 +182,7 @@ describe("buildHostHtmlTemplate", () => {
     });
 
     it("applyCspMeta preserves existing CSP in resource HTML", async () => {
-      const { applyCspMeta } = await import("../host-html-template.js");
+      const { applyCspMeta } = await import("../host-html-template.ts");
       const resourceWithCsp = `<html>
         <head>
           <meta http-equiv="Content-Security-Policy" content="default-src 'self'">

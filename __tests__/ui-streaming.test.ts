@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import http from "node:http";
-import { McpServerManager } from "../server-manager.js";
-import { startUiServer, type UiServerOptions, type UiServerHandle } from "../ui-server.js";
-import type { ConsentManager } from "../consent-manager.js";
+import { McpServerManager } from "../server-manager.ts";
+import { startUiServer, type UiServerOptions, type UiServerHandle } from "../ui-server.ts";
+import type { ConsentManager } from "../consent-manager.ts";
 import {
   UI_STREAM_HOST_CONTEXT_KEY,
   UI_STREAM_STRUCTURED_CONTENT_KEY,
@@ -12,7 +12,7 @@ import {
   serverStreamResultPatchNotificationSchema,
   type UiResourceContent,
   type VisualizationStreamEnvelope,
-} from "../types.js";
+} from "../types.ts";
 
 // Helper to connect to SSE and collect events
 function connectSSE(

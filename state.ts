@@ -1,10 +1,10 @@
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { ConsentManager } from "./consent-manager.js";
-import type { McpLifecycleManager } from "./lifecycle.js";
-import type { McpServerManager } from "./server-manager.js";
-import type { ToolMetadata, McpConfig, UiSessionMessages, UiStreamSummary } from "./types.js";
-import type { UiResourceHandler } from "./ui-resource-handler.js";
-import type { UiServerHandle } from "./ui-server.js";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ConsentManager } from "./consent-manager.ts";
+import type { McpLifecycleManager } from "./lifecycle.ts";
+import type { McpServerManager } from "./server-manager.ts";
+import type { ToolMetadata, McpConfig, UiSessionMessages, UiStreamSummary } from "./types.ts";
+import type { UiResourceHandler } from "./ui-resource-handler.ts";
+import type { UiServerHandle } from "./ui-server.ts";
 
 export interface CompletedUiSession {
   serverName: string;
@@ -18,7 +18,7 @@ export interface CompletedUiSession {
 export type SendMessageFn = (
   message: {
     customType: string;
-    content: Array<{ type: string; text: string }>;
+    content: Array<{ type: "text"; text: string }>;
     display?: string;
     details?: unknown;
   },

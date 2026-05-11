@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { UiResourceHandler } from "../ui-resource-handler.js";
-import type { McpServerManager } from "../server-manager.js";
+import { UiResourceHandler } from "../ui-resource-handler.ts";
+import type { McpServerManager } from "../server-manager.ts";
 
 // Mock the manager
 function createMockManager(overrides: Partial<McpServerManager> = {}): McpServerManager {

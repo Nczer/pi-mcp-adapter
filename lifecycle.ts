@@ -1,6 +1,6 @@
-import type { ServerDefinition } from "./types.js";
-import type { McpServerManager } from "./server-manager.js";
-import { logger } from "./logger.js";
+import type { ServerDefinition } from "./types.ts";
+import type { McpServerManager } from "./server-manager.ts";
+import { logger } from "./logger.ts";
 
 export type ReconnectCallback = (serverName: string) => void;
 

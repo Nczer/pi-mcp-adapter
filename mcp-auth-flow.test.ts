@@ -22,9 +22,9 @@ import {
   initializeOAuth,
   shutdownOAuth,
   type AuthStatus,
-} from "./mcp-auth-flow.js"
-import { updateTokens, clearAllCredentials } from "./mcp-auth.js"
-import type { ServerEntry } from "./types.js"
+} from "./mcp-auth-flow.ts"
+import { updateTokens, clearAllCredentials } from "./mcp-auth.ts"
+import type { ServerEntry } from "./types.ts"
 
 describe("mcp-auth-flow", () => {
   before(() => {

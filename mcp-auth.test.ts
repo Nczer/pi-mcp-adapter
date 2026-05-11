@@ -31,7 +31,7 @@ import {
   clearClientInfo,
   clearTokens,
   type AuthEntry,
-} from "./mcp-auth.js"
+} from "./mcp-auth.ts"
 
 describe("mcp-auth", () => {
   before(() => {
@@ -172,6 +172,42 @@ describe("mcp-auth", () => {
       assert.strictEqual(entry?.clientInfo?.clientId, "client-123")
       assert.strictEqual(entry?.tokens?.accessToken, "token")
     })
+
+    it("should clear URL-bound auth state when tokens move to a different server URL", () => {
+      saveAuthEntry("token-url-change", {
+        tokens: { accessToken: "old-token", refreshToken: "old-refresh" },
+        clientInfo: { clientId: "old-client" },
+        codeVerifier: "old-verifier",
+        oauthState: "old-state",
+        serverUrl: "https://old.example.com/mcp",
+      }, "https://old.example.com/mcp")
+
+      updateTokens("token-url-change", { accessToken: "new-token" }, "https://new.example.com/mcp")
+
+      assert.strictEqual(getAuthForUrl("token-url-change", "https://old.example.com/mcp"), undefined)
+      const newEntry = getAuthForUrl("token-url-change", "https://new.example.com/mcp")
+      assert.strictEqual(newEntry?.tokens?.accessToken, "new-token")
+      assert.strictEqual(newEntry?.clientInfo, undefined)
+      assert.strictEqual(newEntry?.codeVerifier, undefined)
+      assert.strictEqual(newEntry?.oauthState, undefined)
+    })
+
+    it("should clear legacy URL-bound auth state when saving tokens with a server URL", () => {
+      saveAuthEntry("token-legacy-url-change", {
+        tokens: { accessToken: "old-token", refreshToken: "old-refresh" },
+        clientInfo: { clientId: "old-client" },
+        codeVerifier: "old-verifier",
+        oauthState: "old-state",
+      })
+
+      updateTokens("token-legacy-url-change", { accessToken: "new-token" }, "https://new.example.com/mcp")
+
+      const newEntry = getAuthForUrl("token-legacy-url-change", "https://new.example.com/mcp")
+      assert.strictEqual(newEntry?.tokens?.accessToken, "new-token")
+      assert.strictEqual(newEntry?.clientInfo, undefined)
+      assert.strictEqual(newEntry?.codeVerifier, undefined)
+      assert.strictEqual(newEntry?.oauthState, undefined)
+    })
   })
 
   describe("updateClientInfo", () => {
@@ -186,6 +222,42 @@ describe("mcp-auth", () => {
       const entry = getAuthEntry("test-server")
       assert.strictEqual(entry?.clientInfo?.clientId, "client-123")
       assert.strictEqual(entry?.clientInfo?.clientSecret, "secret")
+    })
+
+    it("should clear URL-bound credentials when client info moves to a different server URL", () => {
+      saveAuthEntry("url-change", {
+        tokens: { accessToken: "old-token", refreshToken: "old-refresh" },
+        clientInfo: { clientId: "old-client" },
+        codeVerifier: "old-verifier",
+        oauthState: "old-state",
+        serverUrl: "https://old.example.com/mcp",
+      }, "https://old.example.com/mcp")
+
+      updateClientInfo("url-change", { clientId: "new-client" }, "https://new.example.com/mcp")
+
+      assert.strictEqual(getAuthForUrl("url-change", "https://old.example.com/mcp"), undefined)
+      const newEntry = getAuthForUrl("url-change", "https://new.example.com/mcp")
+      assert.strictEqual(newEntry?.clientInfo?.clientId, "new-client")
+      assert.strictEqual(newEntry?.tokens, undefined)
+      assert.strictEqual(newEntry?.codeVerifier, undefined)
+      assert.strictEqual(newEntry?.oauthState, undefined)
+    })
+
+    it("should clear stale verifier and state when legacy client info gains a server URL", () => {
+      saveAuthEntry("legacy-url-change", {
+        tokens: { accessToken: "old-token", refreshToken: "old-refresh" },
+        clientInfo: { clientId: "old-client" },
+        codeVerifier: "old-verifier",
+        oauthState: "old-state",
+      })
+
+      updateClientInfo("legacy-url-change", { clientId: "new-client" }, "https://new.example.com/mcp")
+
+      const newEntry = getAuthForUrl("legacy-url-change", "https://new.example.com/mcp")
+      assert.strictEqual(newEntry?.clientInfo?.clientId, "new-client")
+      assert.strictEqual(newEntry?.tokens, undefined)
+      assert.strictEqual(newEntry?.codeVerifier, undefined)
+      assert.strictEqual(newEntry?.oauthState, undefined)
     })
   })
 

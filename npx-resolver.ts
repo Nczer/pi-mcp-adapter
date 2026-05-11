@@ -1,7 +1,7 @@
 // npx-resolver.ts - Resolve npx/npm exec binaries to avoid npm parent processes
 import { existsSync, readFileSync, realpathSync, readdirSync, statSync, writeFileSync, renameSync, mkdirSync, openSync, readSync, closeSync } from "node:fs";
 import { join, dirname, extname, resolve, sep } from "node:path";
-import { getAgentPath } from "./agent-dir.js";
+import { getAgentPath } from "./agent-dir.ts";
 import { spawn, spawnSync } from "node:child_process";
 
 const CACHE_VERSION = 1;

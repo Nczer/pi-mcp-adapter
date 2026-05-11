@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { createMcpPanel } from "../mcp-panel.js";
-import { computeServerHash, type MetadataCache } from "../metadata-cache.js";
-import type { McpConfig } from "../types.js";
+import { createMcpPanel } from "../mcp-panel.ts";
+import { computeServerHash, type MetadataCache } from "../metadata-cache.ts";
+import type { McpConfig } from "../types.ts";
 
 function stripAnsi(input: string): string {
   return input.replace(/\x1b\[[0-9;]*m/g, "");
@@ -44,6 +44,8 @@ describe("mcp-panel excludeTools", () => {
       new Map(),
       {
         reconnect: async () => true,
+        canAuthenticate: () => false,
+        authenticate: async () => ({ ok: false }),
         getConnectionStatus: () => "idle",
         refreshCacheAfterReconnect: () => null,
       },

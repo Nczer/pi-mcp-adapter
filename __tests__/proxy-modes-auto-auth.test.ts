@@ -10,12 +10,12 @@ const mocks = vi.hoisted(() => ({
   updateStatusBar: vi.fn(),
 }));
 
-vi.mock("../mcp-auth-flow.js", () => ({
+vi.mock("../mcp-auth-flow.ts", () => ({
   authenticate: mocks.authenticate,
   supportsOAuth: mocks.supportsOAuth,
 }));
 
-vi.mock("../init.js", () => ({
+vi.mock("../init.ts", () => ({
   lazyConnect: mocks.lazyConnect,
   updateServerMetadata: mocks.updateServerMetadata,
   updateMetadataCache: mocks.updateMetadataCache,

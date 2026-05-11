@@ -1,8 +1,8 @@
-import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import { isToolExcluded } from "./types.js";
-import type { McpConfig, McpPanelCallbacks, McpPanelResult, ServerProvenance } from "./types.js";
-import { resourceNameToToolName } from "./resource-tools.js";
-import type { MetadataCache, ServerCacheEntry, CachedTool } from "./metadata-cache.js";
+import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { isToolExcluded } from "./types.ts";
+import type { McpConfig, McpPanelCallbacks, McpPanelResult, ServerProvenance } from "./types.ts";
+import { resourceNameToToolName } from "./resource-tools.ts";
+import type { MetadataCache, ServerCacheEntry, CachedTool } from "./metadata-cache.ts";
 
 interface PanelTheme {
   border: string;
@@ -120,10 +120,12 @@ class McpPanel {
   private discardSelected = 1;
   private importNotice: string | null = null;
   private authNotice: string | null = null;
+  private authInFlight: string | null = null;
   private inactivityTimeout: ReturnType<typeof setTimeout> | null = null;
   private visibleItems: VisibleItem[] = [];
   private tui: { requestRender(): void };
   private t = DEFAULT_THEME;
+  private authOnly: boolean;
 
   private static readonly MAX_VISIBLE = 12;
   private static readonly INACTIVITY_MS = 60_000;
@@ -135,13 +137,15 @@ class McpPanel {
     private callbacks: McpPanelCallbacks,
     tui: { requestRender(): void },
     private done: (result: McpPanelResult) => void,
-    noticeLines: string[] = [],
+    options: { noticeLines?: string[]; authOnly?: boolean } = {},
   ) {
     this.tui = tui;
-    this.noticeLines = noticeLines;
+    this.noticeLines = options.noticeLines ?? [];
+    this.authOnly = options.authOnly === true;
     this.prefix = config.settings?.toolPrefix ?? "server";
 
     for (const [serverName, definition] of Object.entries(config.mcpServers)) {
+      if (this.authOnly && !callbacks.canAuthenticate(serverName)) continue;
       const prov = provenance.get(serverName);
       const serverCache = cache?.servers?.[serverName];
 
@@ -154,7 +158,7 @@ class McpPanel {
       }
 
       const tools: ToolState[] = [];
-      if (serverCache) {
+      if (serverCache && !this.authOnly) {
         for (const tool of serverCache.tools ?? []) {
           if (isToolExcluded(tool.name, serverName, this.prefix, definition.excludeTools)) {
             continue;
@@ -230,6 +234,14 @@ class McpPanel {
     this.visibleItems = [];
     for (let si = 0; si < this.servers.length; si++) {
       const server = this.servers[si];
+      if (query && this.authOnly) {
+        const score = mode === "name" ? fuzzyScore(query, server.name) : 0;
+        if (score > 0) {
+          this.visibleItems.push({ type: "server", serverIndex: si });
+        }
+        continue;
+      }
+
       this.visibleItems.push({ type: "server", serverIndex: si });
       if (server.expanded || query) {
         for (let ti = 0; ti < server.tools.length; ti++) {
@@ -248,7 +260,7 @@ class McpPanel {
       }
     }
 
-    if (query) {
+    if (query && !this.authOnly) {
       this.visibleItems = this.visibleItems.filter((item) => {
         if (item.type === "server") {
           return this.visibleItems.some(
@@ -284,7 +296,7 @@ class McpPanel {
   handleInput(data: string): void {
     this.resetInactivityTimeout();
     this.importNotice = null;
-    this.authNotice = null;
+    if (!this.authInFlight) this.authNotice = null;
 
     if (this.confirmingDiscard) {
       this.handleDiscardInput(data);
@@ -360,7 +372,7 @@ class McpPanel {
 
     if (matchesKey(data, "space")) {
       const item = this.visibleItems[this.cursorIndex];
-      if (item) this.toggleItem(item);
+      if (item && !this.authOnly) this.toggleItem(item);
       return;
     }
 
@@ -369,8 +381,8 @@ class McpPanel {
       if (!item) return;
       const server = this.servers[item.serverIndex];
       if (item.type === "server") {
-        if (server.connectionStatus === "needs-auth") {
-          this.authNotice = `OAuth required — run /mcp-auth ${server.name} after closing this panel`;
+        if (this.authOnly || server.connectionStatus === "needs-auth") {
+          this.authenticateServer(server);
           return;
         }
         server.expanded = !server.expanded;
@@ -384,6 +396,12 @@ class McpPanel {
         }
         this.updateDirty();
       }
+      return;
+    }
+
+    if (matchesKey(data, "ctrl+a")) {
+      const item = this.visibleItems[this.cursorIndex];
+      if (item) this.authenticateSelectedServer(item);
       return;
     }
 
@@ -413,6 +431,7 @@ class McpPanel {
     }
 
     if (data === "?") {
+      if (this.authOnly) return;
       this.descSearchActive = true;
       this.descQuery = "";
       this.rebuildVisibleItems();
@@ -439,7 +458,39 @@ class McpPanel {
     }
   }
 
+  private authenticateSelectedServer(item: VisibleItem): void {
+    this.authenticateServer(this.servers[item.serverIndex]);
+  }
+
+  private authenticateServer(server: ServerState): void {
+    if (this.authInFlight) return;
+    if (!this.callbacks.canAuthenticate(server.name)) {
+      this.authNotice = `${server.name} does not use OAuth authentication.`;
+      return;
+    }
+
+    this.authInFlight = server.name;
+    this.authNotice = `Authenticating ${server.name}...`;
+    this.tui.requestRender();
+
+    this.callbacks.authenticate(server.name).then((result) => {
+      server.connectionStatus = this.callbacks.getConnectionStatus(server.name);
+      this.authNotice = result.ok
+        ? `OAuth finished for ${server.name}. Run reconnect if it is still idle.`
+        : `OAuth failed for ${server.name}${result.message ? `: ${result.message}` : ". Check the notification for details."}`;
+      this.authInFlight = null;
+      this.tui.requestRender();
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      server.connectionStatus = this.callbacks.getConnectionStatus(server.name);
+      this.authNotice = `OAuth failed for ${server.name}: ${message}`;
+      this.authInFlight = null;
+      this.tui.requestRender();
+    });
+  }
+
   private toggleItem(item: VisibleItem): void {
+    if (this.authOnly) return;
     const server = this.servers[item.serverIndex];
     if (item.type === "server") {
       const newState = !server.tools.every((t) => t.isDirect);
@@ -550,7 +601,7 @@ class McpPanel {
     const emptyRow = () => fg(t.border, "│") + " ".repeat(innerW) + fg(t.border, "│");
     const divider = () => fg(t.border, "├" + "─".repeat(innerW) + "┤");
 
-    const titleText = " MCP Servers ";
+    const titleText = this.authOnly ? " MCP OAuth " : " MCP Servers ";
     const borderLen = innerW - visibleWidth(titleText);
     const leftB = Math.floor(borderLen / 2);
     const rightB = borderLen - leftB;
@@ -579,7 +630,7 @@ class McpPanel {
 
     if (this.servers.length === 0) {
       lines.push(emptyRow());
-      lines.push(row(fg(t.hint, italic("No MCP servers configured."))));
+      lines.push(row(fg(t.hint, italic(this.authOnly ? "No OAuth-capable MCP servers configured." : "No MCP servers configured."))));
       lines.push(emptyRow());
     } else {
       const maxVis = McpPanel.MAX_VISIBLE;
@@ -631,27 +682,40 @@ class McpPanel {
         : fg(t.hint, "  Keep  ");
       lines.push(row(`Discard unsaved changes?  ${discardBtn}   ${keepBtn}`));
     } else {
-      const directCount = this.servers.reduce((sum, s) => sum + s.tools.filter((t) => t.isDirect).length, 0);
-      const totalTokens = this.servers.reduce(
-        (sum, s) => sum + s.tools.filter((t) => t.isDirect).reduce((ts, t) => ts + t.estimatedTokens, 0),
-        0,
-      );
-      const stats =
-        directCount > 0 ? `${directCount} direct  ~${totalTokens.toLocaleString()} tokens` : "no direct tools";
-      lines.push(row(fg(t.description, stats + (this.dirty ? fg(t.needsAuth, "  (unsaved)") : ""))));
+      if (this.authOnly) {
+        lines.push(row(fg(t.description, "select a server to authenticate")));
+      } else {
+        const directCount = this.servers.reduce((sum, s) => sum + s.tools.filter((t) => t.isDirect).length, 0);
+        const totalTokens = this.servers.reduce(
+          (sum, s) => sum + s.tools.filter((t) => t.isDirect).reduce((ts, t) => ts + t.estimatedTokens, 0),
+          0,
+        );
+        const stats =
+          directCount > 0 ? `${directCount} direct  ~${totalTokens.toLocaleString()} tokens` : "no direct tools";
+        lines.push(row(fg(t.description, stats + (this.dirty ? fg(t.needsAuth, "  (unsaved)") : ""))));
+      }
     }
 
     lines.push(emptyRow());
-    const hints = [
-      italic("↑↓") + " navigate",
-      italic("space") + " toggle",
-      italic("⏎") + " expand",
-      italic("ctrl+r") + " reconnect",
-      italic("?") + " desc search",
-      italic("ctrl+s") + " save",
-      italic("esc") + " clear/close",
-      italic("ctrl+c") + " quit",
-    ];
+    const hints = this.authOnly
+      ? [
+          italic("↑↓") + " navigate",
+          italic("⏎") + " auth",
+          italic("ctrl+a") + " auth",
+          italic("esc") + " clear/close",
+          italic("ctrl+c") + " quit",
+        ]
+      : [
+          italic("↑↓") + " navigate",
+          italic("space") + " toggle",
+          italic("⏎") + " expand/auth",
+          italic("ctrl+a") + " auth",
+          italic("ctrl+r") + " reconnect",
+          italic("?") + " desc search",
+          italic("ctrl+s") + " save",
+          italic("esc") + " clear/close",
+          italic("ctrl+c") + " quit",
+        ];
     const gap = "  ";
     const gapW = 2;
     const maxW = innerW - 2;
@@ -685,9 +749,10 @@ class McpPanel {
 
     const nameStr = isCursor ? bold(fg(t.selected, server.name)) : server.name;
     const importLabel = server.source === "import" ? fg(t.description, ` (${server.importKind ?? "import"})`) : "";
+    const statusLabel = this.renderConnectionStatus(server);
 
-    if (!server.hasCachedData) {
-      return `${prefix}   ${nameStr}${importLabel}  ${fg(t.description, "(not cached)")}`;
+    if (!server.hasCachedData && !this.authOnly) {
+      return `${prefix}   ${nameStr}${importLabel}  ${fg(t.description, "(not cached)")}${statusLabel}`;
     }
 
     const directCount = server.tools.filter((t) => t.isDirect).length;
@@ -709,7 +774,18 @@ class McpPanel {
       toolInfo = fg(t.description, toolInfo);
     }
 
-    return `${prefix} ${toggleIcon} ${nameStr}${importLabel}  ${toolInfo}`;
+    return `${prefix} ${toggleIcon} ${nameStr}${importLabel}  ${toolInfo}${statusLabel}`;
+  }
+
+  private renderConnectionStatus(server: ServerState): string {
+    const t = this.t;
+    if (this.authInFlight === server.name) return `  ${fg(t.needsAuth, "authenticating")}`;
+    if (server.connectionStatus === "needs-auth") return `  ${fg(t.needsAuth, "needs auth")}`;
+    if (server.connectionStatus === "connecting") return `  ${fg(t.needsAuth, "connecting")}`;
+    if (server.connectionStatus === "failed") return `  ${fg(t.cancel, "failed")}`;
+    if (this.authOnly && server.connectionStatus === "connected") return `  ${fg(t.direct, "connected")}`;
+    if (this.authOnly) return `  ${fg(t.description, "idle")}`;
+    return "";
   }
 
   private renderToolRow(tool: ToolState, isCursor: boolean, innerW: number): string {
@@ -744,7 +820,7 @@ export function createMcpPanel(
   callbacks: McpPanelCallbacks,
   tui: { requestRender(): void },
   done: (result: McpPanelResult) => void,
-  options?: { noticeLines?: string[] },
+  options?: { noticeLines?: string[]; authOnly?: boolean },
 ): McpPanel & { dispose(): void } {
-  return new McpPanel(config, cache, provenance, callbacks, tui, done, options?.noticeLines ?? []);
+  return new McpPanel(config, cache, provenance, callbacks, tui, done, options ?? {});
 }

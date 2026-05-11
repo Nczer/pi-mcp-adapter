@@ -7,12 +7,12 @@ const mocks = vi.hoisted(() => ({
   supportsOAuth: vi.fn(),
 }));
 
-vi.mock("../init.js", () => ({
+vi.mock("../init.ts", () => ({
   lazyConnect: mocks.lazyConnect,
   getFailureAgeSeconds: mocks.getFailureAgeSeconds,
 }));
 
-vi.mock("../mcp-auth-flow.js", () => ({
+vi.mock("../mcp-auth-flow.ts", () => ({
   authenticate: mocks.authenticate,
   supportsOAuth: mocks.supportsOAuth,
 }));

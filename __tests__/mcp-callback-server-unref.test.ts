@@ -61,7 +61,7 @@ vi.mock("http", () => ({
   createServer: mocks.createServer,
 }));
 
-vi.mock("../mcp-oauth-provider.js", () => ({
+vi.mock("../mcp-oauth-provider.ts", () => ({
   OAUTH_CALLBACK_PATH: "/callback",
   getConfiguredOAuthCallbackPort: mocks.getConfiguredOAuthCallbackPort,
   getOAuthCallbackPort: mocks.getOAuthCallbackPort,

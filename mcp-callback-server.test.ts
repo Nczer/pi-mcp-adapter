@@ -11,8 +11,8 @@ import {
   stopCallbackServer,
   isCallbackServerRunning,
   getPendingAuthCount,
-} from "./mcp-callback-server.js"
-import { getOAuthCallbackPort } from "./mcp-oauth-provider.js"
+} from "./mcp-callback-server.ts"
+import { getOAuthCallbackPort } from "./mcp-oauth-provider.ts"
 
 describe("mcp-callback-server", () => {
   beforeEach(async () => {

@@ -1,9 +1,9 @@
 import { RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/app-bridge";
 import type { ReadResourceResult } from "@modelcontextprotocol/sdk/types.js";
-import { ResourceFetchError, ResourceParseError } from "./errors.js";
-import { logger } from "./logger.js";
-import type { McpServerManager } from "./server-manager.js";
-import type { UiResourceContent, UiResourceMeta } from "./types.js";
+import { ResourceFetchError, ResourceParseError } from "./errors.ts";
+import { logger } from "./logger.ts";
+import type { McpServerManager } from "./server-manager.ts";
+import type { UiResourceContent, UiResourceMeta } from "./types.ts";
 
 interface ResourceContentRecord {
   uri?: string;

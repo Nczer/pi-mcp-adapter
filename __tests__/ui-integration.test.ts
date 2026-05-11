@@ -6,11 +6,11 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import http from "node:http";
-import { startUiServer, type UiServerHandle } from "../ui-server.js";
-import { UiResourceHandler } from "../ui-resource-handler.js";
-import { ConsentManager } from "../consent-manager.js";
-import type { McpServerManager } from "../server-manager.js";
-import type { UiResourceContent, UiSessionMessages } from "../types.js";
+import { startUiServer, type UiServerHandle } from "../ui-server.ts";
+import { UiResourceHandler } from "../ui-resource-handler.ts";
+import { ConsentManager } from "../consent-manager.ts";
+import type { McpServerManager } from "../server-manager.ts";
+import type { UiResourceContent, UiSessionMessages } from "../types.ts";
 
 // Helper to make HTTP requests
 async function request(

@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
-import { McpOAuthProvider } from "../mcp-oauth-provider.js";
-import { updateOAuthState } from "../mcp-auth.js";
+import { McpOAuthProvider } from "../mcp-oauth-provider.ts";
+import { saveAuthEntry, updateOAuthState } from "../mcp-auth.ts";
 
 describe("McpOAuthProvider authorization fallback", () => {
   const originalOAuthDir = process.env.MCP_OAUTH_DIR;
@@ -48,7 +48,7 @@ describe("McpOAuthProvider authorization fallback", () => {
   it("still redirects when startAuth has seeded OAuth state", async () => {
     const authUrl = new URL("https://auth.example.com/authorize");
     let redirected: URL | undefined;
-    updateOAuthState("redirect-active", "state-abc");
+    updateOAuthState("redirect-active", "state-abc", serverUrl);
     const provider = new McpOAuthProvider("redirect-active", serverUrl, {}, {
       onRedirect: async (url) => {
         redirected = url;
@@ -58,5 +58,22 @@ describe("McpOAuthProvider authorization fallback", () => {
     await provider.redirectToAuthorization(authUrl);
 
     expect(redirected).toBe(authUrl);
+  });
+
+  it("throws before redirecting when only stale URL-bound state exists", async () => {
+    let redirected = false;
+    saveAuthEntry("redirect-stale-url", {
+      oauthState: "state-abc",
+      serverUrl: "https://old.example.com/mcp",
+    }, "https://old.example.com/mcp");
+    const provider = new McpOAuthProvider("redirect-stale-url", serverUrl, {}, {
+      onRedirect: async () => {
+        redirected = true;
+      },
+    });
+
+    await expect(provider.redirectToAuthorization(new URL("https://auth.example.com/authorize")))
+      .rejects.toBeInstanceOf(UnauthorizedError);
+    expect(redirected).toBe(false);
   });
 });

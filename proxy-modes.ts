@@ -1,13 +1,13 @@
-import type { AgentToolResult, ToolInfo } from "@mariozechner/pi-coding-agent";
-import type { McpExtensionState } from "./state.js";
-import type { ToolMetadata, McpContent } from "./types.js";
-import { getServerPrefix, parseUiPromptHandoff } from "./types.js";
-import { lazyConnect, updateServerMetadata, updateMetadataCache, getFailureAgeSeconds, updateStatusBar } from "./init.js";
-import { buildToolMetadata, getToolNames, findToolByName, formatSchema } from "./tool-metadata.js";
-import { transformMcpContent } from "./tool-registrar.js";
-import { maybeStartUiSession, type UiSessionRuntime } from "./ui-session.js";
-import { formatAuthRequiredMessage, truncateAtWord } from "./utils.js";
-import { authenticate, supportsOAuth } from "./mcp-auth-flow.js";
+import type { AgentToolResult, ToolInfo } from "@earendil-works/pi-coding-agent";
+import type { McpExtensionState } from "./state.ts";
+import type { ToolMetadata, McpContent } from "./types.ts";
+import { getServerPrefix, parseUiPromptHandoff } from "./types.ts";
+import { lazyConnect, updateServerMetadata, updateMetadataCache, getFailureAgeSeconds, updateStatusBar } from "./init.ts";
+import { buildToolMetadata, getToolNames, findToolByName, formatSchema } from "./tool-metadata.ts";
+import { transformMcpContent } from "./tool-registrar.ts";
+import { maybeStartUiSession, type UiSessionRuntime } from "./ui-session.ts";
+import { formatAuthRequiredMessage, truncateAtWord } from "./utils.ts";
+import { authenticate, supportsOAuth } from "./mcp-auth-flow.ts";
 
 type ProxyToolResult = AgentToolResult<Record<string, unknown>>;
 
@@ -45,7 +45,7 @@ async function attemptAutoAuth(
     return { status: "skipped" };
   }
 
-  const grantType = definition.oauth?.grantType ?? "authorization_code";
+  const grantType = definition.oauth ? definition.oauth.grantType ?? "authorization_code" : "authorization_code";
   if (!state.ui && grantType !== "client_credentials") {
     return {
       status: "failed",

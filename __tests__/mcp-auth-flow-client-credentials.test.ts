@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const mocks = vi.hoisted(() => ({
   ensureCallbackServer: vi.fn(),
@@ -29,7 +32,7 @@ vi.mock("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
   StreamableHTTPClientTransport: MockStreamableHTTPClientTransport,
 }));
 
-vi.mock("../mcp-callback-server.js", () => ({
+vi.mock("../mcp-callback-server.ts", () => ({
   ensureCallbackServer: mocks.ensureCallbackServer,
   waitForCallback: mocks.waitForCallback,
   cancelPendingCallback: mocks.cancelPendingCallback,
@@ -41,7 +44,12 @@ vi.mock("open", () => ({
 }));
 
 describe("mcp-auth-flow explicit auth", () => {
+  const originalOAuthDir = process.env.MCP_OAUTH_DIR;
+  let authDir: string;
+
   beforeEach(() => {
+    authDir = mkdtempSync(join(tmpdir(), "pi-mcp-auth-flow-"));
+    process.env.MCP_OAUTH_DIR = authDir;
     vi.resetModules();
     mocks.ensureCallbackServer.mockReset();
     mocks.waitForCallback.mockReset();
@@ -51,6 +59,15 @@ describe("mcp-auth-flow explicit auth", () => {
     mocks.sdkAuth.mockReset().mockResolvedValue("AUTHORIZED");
     mocks.finishAuth.mockReset().mockResolvedValue(undefined);
     mocks.transportClose.mockReset().mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    rmSync(authDir, { recursive: true, force: true });
+    if (originalOAuthDir === undefined) {
+      delete process.env.MCP_OAUTH_DIR;
+    } else {
+      process.env.MCP_OAUTH_DIR = originalOAuthDir;
+    }
   });
 
   it("authenticates client_credentials non-interactively without callback server or browser", async () => {
@@ -71,6 +88,43 @@ describe("mcp-auth-flow explicit auth", () => {
     expect(mocks.transportClose).not.toHaveBeenCalled();
     expect(mocks.ensureCallbackServer).not.toHaveBeenCalled();
     expect(mocks.waitForCallback).not.toHaveBeenCalled();
+    expect(mocks.open).not.toHaveBeenCalled();
+  });
+
+  it("clears stale dynamic client info before client_credentials auth", async () => {
+    mocks.sdkAuth.mockImplementationOnce(async (provider) => {
+      expect(await provider.clientInformation()).toBeUndefined();
+      await provider.saveClientInformation({
+        client_id: "fresh-service-client",
+        client_secret: "fresh-service-secret",
+      });
+      await provider.saveTokens({
+        access_token: "service-access",
+        token_type: "Bearer",
+        expires_in: 3600,
+      });
+      return "AUTHORIZED";
+    });
+    const { authenticate } = await import("../mcp-auth-flow.ts");
+    const { getAuthForUrl, updateClientInfo, updateCodeVerifier, updateOAuthState } = await import("../mcp-auth.ts");
+
+    updateClientInfo("stale-client-credentials", { clientId: "stale-client" }, "https://api.example.com/mcp");
+    updateCodeVerifier("stale-client-credentials", "stale-verifier");
+    updateOAuthState("stale-client-credentials", "stale-state");
+
+    const status = await authenticate("stale-client-credentials", "https://api.example.com/mcp", {
+      url: "https://api.example.com/mcp",
+      auth: "oauth",
+      oauth: { grantType: "client_credentials" },
+    });
+
+    expect(status).toBe("authenticated");
+    const stored = getAuthForUrl("stale-client-credentials", "https://api.example.com/mcp");
+    expect(stored?.clientInfo?.clientId).toBe("fresh-service-client");
+    expect(stored?.tokens?.accessToken).toBe("service-access");
+    expect(stored?.codeVerifier).toBeUndefined();
+    expect(stored?.oauthState).toBeUndefined();
+    expect(mocks.ensureCallbackServer).not.toHaveBeenCalled();
     expect(mocks.open).not.toHaveBeenCalled();
   });
 
@@ -149,6 +203,89 @@ describe("mcp-auth-flow explicit auth", () => {
 
     expect(token?.accessToken).toBe("new-access");
     expect(mocks.sdkAuth).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-registers dynamic OAuth clients when only stale client info is stored", async () => {
+    mocks.sdkAuth.mockImplementationOnce(async (provider) => {
+      expect(await provider.clientInformation()).toBeUndefined();
+      await provider.saveClientInformation({
+        client_id: "fresh-client",
+        client_secret: "fresh-secret",
+      });
+      await provider.redirectToAuthorization(new URL("https://auth.example.com/authorize"));
+      return "REDIRECT";
+    });
+    const { startAuth } = await import("../mcp-auth-flow.ts");
+    const { getAuthForUrl, getOAuthState, updateClientInfo, updateCodeVerifier, updateOAuthState } = await import("../mcp-auth.ts");
+
+    updateClientInfo("stale", { clientId: "stale-client" }, "https://api.example.com/mcp");
+    updateCodeVerifier("stale", "old-verifier");
+    updateOAuthState("stale", "old-state");
+
+    const result = await startAuth("stale", "https://api.example.com/mcp", {
+      url: "https://api.example.com/mcp",
+      auth: "oauth",
+    });
+
+    expect(result.authorizationUrl).toBe("https://auth.example.com/authorize");
+    const stored = getAuthForUrl("stale", "https://api.example.com/mcp");
+    expect(stored?.clientInfo?.clientId).toBe("fresh-client");
+    expect(stored?.codeVerifier).toBeUndefined();
+    expect(getOAuthState("stale")).not.toBe("old-state");
+  });
+
+  it("preserves stored dynamic client info when tokens exist", async () => {
+    mocks.sdkAuth.mockImplementationOnce(async (provider) => {
+      expect(await provider.clientInformation()).toEqual({ client_id: "stored-client", client_secret: "stored-secret" });
+      await provider.redirectToAuthorization(new URL("https://auth.example.com/authorize"));
+      return "REDIRECT";
+    });
+    const { startAuth } = await import("../mcp-auth-flow.ts");
+    const { getAuthForUrl, updateClientInfo, updateTokens } = await import("../mcp-auth.ts");
+
+    updateClientInfo("tokened", { clientId: "stored-client", clientSecret: "stored-secret" }, "https://api.example.com/mcp");
+    updateTokens("tokened", { accessToken: "access", refreshToken: "refresh" }, "https://api.example.com/mcp");
+
+    await startAuth("tokened", "https://api.example.com/mcp", {
+      url: "https://api.example.com/mcp",
+      auth: "oauth",
+    });
+
+    expect(getAuthForUrl("tokened", "https://api.example.com/mcp")?.clientInfo?.clientId).toBe("stored-client");
+  });
+
+  it("does not return tokens from the previous URL after dynamic client info is saved for a new URL", async () => {
+    const { getValidToken } = await import("../mcp-auth-flow.ts");
+    const { getAuthForUrl, updateClientInfo, updateTokens } = await import("../mcp-auth.ts");
+
+    updateClientInfo("url-change", { clientId: "old-client" }, "https://old.example.com/mcp");
+    updateTokens("url-change", { accessToken: "old-access", refreshToken: "old-refresh" }, "https://old.example.com/mcp");
+    updateClientInfo("url-change", { clientId: "new-client" }, "https://new.example.com/mcp");
+
+    await expect(getValidToken("url-change", "https://new.example.com/mcp")).resolves.toBeNull();
+    expect(getAuthForUrl("url-change", "https://old.example.com/mcp")).toBeUndefined();
+    expect(getAuthForUrl("url-change", "https://new.example.com/mcp")?.tokens).toBeUndefined();
+  });
+
+  it("preserves pre-registered OAuth client behavior", async () => {
+    mocks.sdkAuth.mockImplementationOnce(async (provider) => {
+      expect(await provider.clientInformation()).toEqual({ client_id: "registered-client", client_secret: undefined });
+      await provider.redirectToAuthorization(new URL("https://auth.example.com/authorize"));
+      return "REDIRECT";
+    });
+    const { startAuth } = await import("../mcp-auth-flow.ts");
+    const { getAuthForUrl, updateClientInfo } = await import("../mcp-auth.ts");
+
+    updateClientInfo("registered", { clientId: "stored-dynamic-client" }, "https://api.example.com/mcp");
+
+    await startAuth("registered", "https://api.example.com/mcp", {
+      url: "https://api.example.com/mcp",
+      auth: "oauth",
+      oauth: { clientId: "registered-client" },
+    });
+
+    expect(getAuthForUrl("registered", "https://api.example.com/mcp")?.clientInfo?.clientId).toBe("stored-dynamic-client");
+    expect(mocks.ensureCallbackServer).toHaveBeenCalledWith({ strictPort: true });
   });
 
   it("cleans up pending auth when the browser cannot open", async () => {

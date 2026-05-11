@@ -1,6 +1,6 @@
-import { complete, type Api, type AssistantMessage, type Message, type Model, type TextContent } from "@mariozechner/pi-ai";
-import { truncateAtWord } from "./utils.js";
-import type { ExtensionUIContext, ModelRegistry } from "@mariozechner/pi-coding-agent";
+import { complete, type Api, type AssistantMessage, type Message, type Model, type TextContent } from "@earendil-works/pi-ai";
+import { truncateAtWord } from "./utils.ts";
+import type { ExtensionUIContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   CreateMessageRequestSchema,
@@ -147,10 +147,11 @@ async function resolveSamplingModel(
   const errors: string[] = [];
   for (const model of candidates) {
     const auth = await options.modelRegistry.getApiKeyAndHeaders(model);
-    if (auth.ok) {
-      return { model, apiKey: auth.apiKey, headers: auth.headers };
+    if (auth.ok === false) {
+      errors.push(`${model.provider}/${model.id}: ${auth.error}`);
+      continue;
     }
-    errors.push(`${model.provider}/${model.id}: ${auth.error}`);
+    return { model, apiKey: auth.apiKey, headers: auth.headers };
   }
 
   if (errors.length > 0) {

@@ -13,16 +13,17 @@ const mocks = {
   createMcpSetupPanel: vi.fn(),
 };
 
-vi.mock("../mcp-panel.js", () => ({
+vi.mock("../mcp-panel.ts", () => ({
   createMcpPanel: mocks.createMcpPanel,
 }));
 
-vi.mock("../mcp-setup-panel.js", () => ({
+vi.mock("../mcp-setup-panel.ts", () => ({
   createMcpSetupPanel: mocks.createMcpSetupPanel,
 }));
 
 describe("commands onboarding", () => {
   const originalHome = process.env.HOME;
+  const originalOAuthDir = process.env.MCP_OAUTH_DIR;
   const originalCwd = process.cwd();
 
   beforeEach(() => {
@@ -39,6 +40,11 @@ describe("commands onboarding", () => {
 
   afterEach(() => {
     process.env.HOME = originalHome;
+    if (originalOAuthDir === undefined) {
+      delete process.env.MCP_OAUTH_DIR;
+    } else {
+      process.env.MCP_OAUTH_DIR = originalOAuthDir;
+    }
     process.chdir(originalCwd);
   });
 
@@ -94,5 +100,31 @@ describe("commands onboarding", () => {
     const options = mocks.createMcpPanel.mock.calls[0]?.[6];
     expect(options.noticeLines[0]).toContain("Using standard MCP config");
     expect(loadOnboardingState().sharedConfigHintShown).toBe(true);
+  });
+
+  it("marks explicit OAuth servers as needs-auth when only stale URL tokens exist", async () => {
+    process.env.MCP_OAUTH_DIR = mkdtempSync(join(tmpdir(), "pi-mcp-commands-oauth-"));
+    const ui = createUi();
+    const { updateTokens } = await import("../mcp-auth.ts");
+    const { openMcpPanel } = await import("../commands.ts");
+
+    updateTokens("legacy", { accessToken: "legacy-token" });
+    updateTokens("stale", { accessToken: "stale-token" }, "https://old.example.com/mcp");
+
+    await openMcpPanel({
+      config: {
+        mcpServers: {
+          legacy: { url: "https://new.example.com/mcp", auth: "oauth" },
+          stale: { url: "https://new.example.com/mcp", auth: "oauth" },
+        },
+      },
+      manager: { getConnection: () => null },
+      toolMetadata: new Map(),
+      failureTracker: new Map(),
+    } as any, { getFlag: () => undefined } as any, { hasUI: true, ui } as any);
+
+    const callbacks = mocks.createMcpPanel.mock.calls[0]?.[3];
+    expect(callbacks.getConnectionStatus("legacy")).toBe("needs-auth");
+    expect(callbacks.getConnectionStatus("stale")).toBe("needs-auth");
   });
 });
