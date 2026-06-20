@@ -12,10 +12,9 @@ import { loadMetadataCache, type MetadataCache } from "./metadata-cache.ts";
 import { createPromptCommand, resolveCachedPrompts } from "./prompts.ts";
 import { logger } from "./logger.ts";
 import { executeAuthComplete, executeAuthStart, executeCall, executeConnect, executeDescribe, executeInstructions, executeList, executeSearch, executeStatus, executeUiMessages } from "./proxy-modes.ts";
-import { formatTerminalError, getConfigPathFromArgv, normalizeDirectToolInputSchema, truncateAtWord } from "./utils.ts";
+import { formatTerminalError, getConfigPathFromArgv } from "./utils.ts";
 import { createOAuthRuntime, shutdownOAuth } from "./mcp-auth-flow.ts";
 import { createMcpDirectToolCallRenderer, renderMcpProxyToolCall, renderMcpToolResult } from "./tool-result-renderer.ts";
-import { toolErrorOverride } from "./error-signal.ts";
 import { createMcpRuntimeOwner, createOwnedUi, isAbortError, type McpRuntimeOwner } from "./runtime-owner.ts";
 import { publishMcpStatusShutdown } from "./mcp-status.ts";
 import { runMcpScript } from "./mcp-code.ts";
@@ -127,15 +126,6 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   let proxyToolDescription: string | null = null;
   let directToolsFrozen = false;
 
-  // OMP remaps `typebox` to a host shim that historically lacked Type.Unsafe.
-  // Prefer Unsafe when present (real TypeBox / fixed OMP shim); otherwise pass
-  // the normalized JSON Schema through as a plain object so toolWireSchema and
-  // validateToolArguments still treat it as JSON Schema.
-  const toToolParameters = (schema: Record<string, unknown>) =>
-    typeof (Type as { Unsafe?: (value: never) => unknown }).Unsafe === "function"
-      ? (Type as { Unsafe: (value: never) => unknown }).Unsafe(schema as never)
-      : schema;
-
   function directToolFingerprint(spec: DirectToolSpec): string {
     return JSON.stringify({
       serverName: spec.serverName,
@@ -154,8 +144,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       name: spec.prefixedName,
       label: `MCP: ${spec.originalName}`,
       description: spec.description || "(no description)",
-      promptSnippet: truncateAtWord(spec.description, 100) || `MCP tool from ${spec.serverName}`,
-      parameters: toToolParameters(normalizeDirectToolInputSchema(spec.inputSchema)),
+      parameters: Type.Unsafe((spec.inputSchema || { type: "object", properties: {} }) as never),
       execute: createDirectToolExecutor(() => state, () => initPromise, spec),
       renderCall: createMcpDirectToolCallRenderer(spec.prefixedName),
       renderResult: renderMcpToolResult,
@@ -425,9 +414,6 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     }
   });
 
-  // Re-flag returned MCP tool failures so pi registers them as errors (see toolErrorOverride).
-  pi.on("tool_result", (event) => toolErrorOverride(event.details));
-
   pi.registerCommand("mcp", {
     description: "Show MCP server status",
     getArgumentCompletions: (prefix: string) => {
@@ -682,7 +668,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       name: "mcp",
       label: "MCP",
       description,
-      promptSnippet: "MCP gateway — status, search, describe, auth, and single MCP tool calls",
+
       renderCall: renderMcpProxyToolCall,
       parameters: Type.Object({
         tool: Type.Optional(Type.String({ description: "Tool name to call (e.g., 'xcodebuild_list_sims')" })),
@@ -804,7 +790,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
             : executeAuthComplete(state, params.server, input);
         }
         if (params.tool) {
-          return executeCall(state, params.tool, parsedArgs, params.server, getPiTools, signal);
+          return executeCall(state, params.tool, parsedArgs, params.server, getPiTools);
         }
         if (params.connect) {
           const result = await executeConnect(state, params.connect, signal);
