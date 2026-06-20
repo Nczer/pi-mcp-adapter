@@ -537,7 +537,7 @@ export async function executeConnect(state: McpExtensionState, serverName: strin
 
   try {
     if (state.ui) {
-      state.ui.setStatus("mcp", `MCP: connecting to ${serverName}...`);
+      state.ui.setStatus("mcp", `${state.ui.theme.fg("dim", "· ")}MCP: connecting to ${serverName}...`);
     }
     let connection = await state.manager.connect(serverName, definition, signal);
     if (connection.status === "needs-auth") {
@@ -777,7 +777,7 @@ export async function executeCall(
 
     try {
       if (state.ui) {
-        state.ui.setStatus("mcp", `MCP: connecting to ${serverName}...`);
+        state.ui.setStatus("mcp", `${state.ui.theme.fg("dim", "· ")}MCP: connecting to ${serverName}...`);
       }
       connection = await state.manager.connect(serverName, definition, signal);
       if (connection.status === "needs-auth") {

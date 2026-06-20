@@ -126,7 +126,7 @@ export async function initializeMcp(
       });
 
   if (ctx.hasUI && startupServers.length > 0) {
-    ctx.ui.setStatus("mcp", `MCP: connecting to ${startupServers.length} servers...`);
+    ctx.ui.setStatus("mcp", `${ctx.ui.theme.fg("dim", "· ")}MCP: connecting to ${startupServers.length} servers...`);
   }
 
   const results = await parallelLimit(startupServers, 10, async ([name, definition]) => {
@@ -288,7 +288,7 @@ export function updateStatusBar(state: McpExtensionState): void {
     return;
   }
   const connectedCount = state.manager.getAllConnections().size;
-  ui.setStatus("mcp", ui.theme.fg("accent", `MCP: ${connectedCount}/${total} servers`));
+  ui.setStatus("mcp", `${ui.theme.fg("dim", "· ")}${ui.theme.fg("accent", "MCP:")} ${ui.theme.fg("dim", `${connectedCount}/${total} servers`)}`);
 }
 
 export function getFailureAgeSeconds(state: McpExtensionState, serverName: string): number | null {
@@ -317,7 +317,7 @@ export async function lazyConnect(state: McpExtensionState, serverName: string, 
 
   try {
     if (state.ui) {
-      state.ui.setStatus("mcp", `MCP: connecting to ${serverName}...`);
+      state.ui.setStatus("mcp", `${state.ui.theme.fg("dim", "· ")}MCP: connecting to ${serverName}...`);
     }
     const newConnection = await state.manager.connect(serverName, definition, signal);
     if (newConnection.status === "needs-auth") {

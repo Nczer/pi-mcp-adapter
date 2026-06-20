@@ -211,7 +211,10 @@ export function buildProxyDescription(
   directSpecs: DirectToolSpec[],
 ): string {
   const prefix = config.settings?.toolPrefix ?? "server";
-  let desc = `MCP gateway - connect to MCP servers and call their tools. Non-MCP Pi tools should be called directly, not through mcp.\n`;
+  let desc = `MCP gateway - connect to MCP servers and call their tools.\n\n`;
+  desc += `⚠ Every tool listed in your available tools should be called directly, NEVER through mcp.\n`;
+  desc += `Only use mcp for capabilities that have no native tool. Do not use mcp({ search }) to\n`;
+  desc += `discover tools — it only searches external MCP servers, not your native tool set.\n`;
 
   const directByServer = new Map<string, number>();
   for (const spec of directSpecs) {
