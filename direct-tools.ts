@@ -1,5 +1,5 @@
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { UrlElicitationRequiredError, type Client } from "@modelcontextprotocol/client";
+import { UrlElicitationRequiredError } from "@modelcontextprotocol/sdk/types.js";
 import type { McpExtensionState } from "./state.ts";
 import type { DirectToolSpec, McpConfig, McpContent, ToolPrefix } from "./types.ts";
 import type { MetadataCache } from "./metadata-cache.ts";
@@ -17,9 +17,6 @@ import { authenticate, supportsOAuth } from "./mcp-auth-flow.ts";
 import { formatAuthRequiredMessage, resolveServerUrl, truncateAtWord } from "./utils.ts";
 import { SessionRecoveryAuthRequiredError, withSessionRecovery } from "./session-recovery.ts";
 import { combineAbortSignals, isAbortError } from "./runtime-owner.ts";
-import { ensureToolCallApproved } from "./tool-approval.ts";
-
-type ClientCallToolResult = Awaited<ReturnType<Client["callTool"]>>;
 
 const BUILTIN_NAMES = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "mcp"]);
 const INSTRUCTIONS_SNIPPET_LENGTH = 150;
@@ -94,10 +91,7 @@ async function attemptDirectAutoAuth(
           : { authStorageOptions: state.authStorageOptions, runtime: state.oauthRuntime },
       );
     } else {
-      await authenticate(serverName, serverUrl, definition, {
-        ...(signal ? { signal } : {}),
-        runtime: state.oauthRuntime,
-      });
+      await authenticate(serverName, serverUrl, definition, { signal, runtime: state.oauthRuntime });
     }
     return { status: "success" };
   } catch (error) {
@@ -167,9 +161,9 @@ export function resolveDirectTools(
         originalName: tool.name,
         prefixedName,
         description: tool.description ?? "",
-        ...(tool.inputSchema !== undefined ? { inputSchema: tool.inputSchema } : {}),
-        ...(tool.uiResourceUri !== undefined ? { uiResourceUri: tool.uiResourceUri } : {}),
-        ...(tool.uiStreamMode !== undefined ? { uiStreamMode: tool.uiStreamMode } : {}),
+        inputSchema: tool.inputSchema,
+        uiResourceUri: tool.uiResourceUri,
+        uiStreamMode: tool.uiStreamMode,
       });
     }
 
@@ -212,7 +206,10 @@ export function buildProxyDescription(
   directSpecs: DirectToolSpec[],
 ): string {
   const prefix = config.settings?.toolPrefix ?? "server";
-  let desc = `MCP gateway — server status, tool search/describe, auth, and single MCP tool calls. When one request needs several MCP calls with logic between them, use mcpScript. Non-MCP Pi tools should be called directly, not through mcp.\n`;
+  let desc = `MCP gateway - connect to MCP servers and call their tools.\n\n`;
+  desc += `⚠ Every tool listed in your available tools should be called directly, NEVER through mcp.\n`;
+  desc += `Only use mcp for capabilities that have no native tool. Do not use mcp({ search }) to\n`;
+  desc += `discover tools — it only searches external MCP servers, not your native tool set.\n`;
 
   const directByServer = new Map<string, number>();
   for (const spec of directSpecs) {
@@ -228,7 +225,7 @@ export function buildProxyDescription(
   const serverSummaries: string[] = [];
   for (const serverName of Object.keys(config.mcpServers)) {
     const definition = config.mcpServers[serverName];
-    if (!definition || isServerDisabled(definition)) continue;
+    if (isServerDisabled(definition)) continue;
     const entry = cache?.servers?.[serverName];
     const effectivePrefix = resolveToolPrefix(definition, prefix);
     const toolCount = (entry?.tools ?? []).filter(
@@ -378,30 +375,6 @@ export function createDirectToolExecutor(
       };
     }
 
-    const approval = await ensureToolCallApproved(state, spec.serverName, {
-      name: spec.prefixedName,
-      originalName: spec.originalName,
-      description: spec.description,
-      ...(spec.inputSchema !== undefined ? { inputSchema: spec.inputSchema } : {}),
-      ...(spec.resourceUri !== undefined ? { resourceUri: spec.resourceUri } : {}),
-      ...(spec.uiResourceUri !== undefined ? { uiResourceUri: spec.uiResourceUri } : {}),
-      ...(spec.uiStreamMode !== undefined ? { uiStreamMode: spec.uiStreamMode } : {}),
-    }, params, ownedSignal, spec.resourceUri ? "resource" : "direct");
-    if (approval.ok === false) {
-      const denied = approval.reason === "denied";
-      const message = denied
-        ? `The user declined approval to run MCP tool "${spec.originalName}" on server "${spec.serverName}".`
-        : `MCP tool "${spec.originalName}" on server "${spec.serverName}" is approval-gated and requires an interactive session.`;
-      return {
-        content: [{ type: "text" as const, text: message }],
-        details: {
-          error: denied ? "approval_denied" : "approval_required",
-          server: spec.serverName,
-          tool: spec.originalName,
-        },
-      };
-    }
-
     let uiSession: UiSessionRuntime | null = null;
     const requestOptions = state.manager.getRequestOptions?.(spec.serverName, ownedSignal) ?? (ownedSignal ? { signal: ownedSignal } : undefined);
 
@@ -436,12 +409,7 @@ export function createDirectToolExecutor(
 
       if (spec.resourceUri) {
         const result = await withSessionRecovery(
-          {
-            manager: state.manager,
-            config: state.config,
-            ...(ownedSignal ? { signal: ownedSignal } : {}),
-            onNeedsAuth: recoverAuthConnection,
-          },
+          { manager: state.manager, config: state.config, signal: ownedSignal, onNeedsAuth: recoverAuthConnection },
           spec.serverName,
           (conn) => conn.client.readResource({ uri: spec.resourceUri! }, requestOptions),
         );
@@ -463,27 +431,22 @@ export function createDirectToolExecutor(
             toolName: spec.originalName,
             toolArgs: params ?? {},
             uiResourceUri: spec.uiResourceUri!,
-            ...(spec.uiStreamMode !== undefined ? { streamMode: spec.uiStreamMode } : {}),
-            ...(signal ? { signal } : {}),
+            streamMode: spec.uiStreamMode,
+            signal,
             onNeedsAuth: recoverAuthConnection,
           })
         : null;
 
-      const result = await withSessionRecovery<ClientCallToolResult>(
-        {
-          manager: state.manager,
-          config: state.config,
-          ...(ownedSignal ? { signal: ownedSignal } : {}),
-          onNeedsAuth: recoverAuthConnection,
-        },
+      const result = await withSessionRecovery(
+        { manager: state.manager, config: state.config, signal: ownedSignal, onNeedsAuth: recoverAuthConnection },
         spec.serverName,
         (conn) => abortable(conn.client.callTool({
           name: spec.originalName,
           arguments: params ?? {},
           _meta: uiSession?.requestMeta,
-        }, requestOptions), ownedSignal),
+        }, undefined, requestOptions), ownedSignal),
       );
-      uiSession?.sendToolResult(result as unknown as import("@modelcontextprotocol/client").CallToolResult);
+      uiSession?.sendToolResult(result as unknown as import("@modelcontextprotocol/sdk/types.js").CallToolResult);
 
       if (result.isError) {
         const mcpContent = (result.content ?? []) as McpContent[];
