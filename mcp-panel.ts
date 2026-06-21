@@ -849,10 +849,14 @@ class McpPanel {
     const nameStr = isCursor ? bold(fg(t.selected, toolName)) : toolName;
 
     const prefixLen = 7 + visibleWidth(toolName);
-    const maxDescLen = Math.max(0, innerW - prefixLen - 8);
+    const maxDescLen = Math.max(0, innerW - prefixLen - 4);
     const descStr =
-      maxDescLen > 5 && description
-        ? fg(t.description, "— " + truncateToWidth(description, maxDescLen, "…"))
+      maxDescLen > 2 && description
+        ? fg(t.description, "— " + truncateToWidth(
+            description.replace(/\s+/g, " ").trim(),
+            maxDescLen,
+            "…",
+          ))
         : "";
 
     return `  ${cursor} ${toggleIcon} ${nameStr} ${descStr}`;
