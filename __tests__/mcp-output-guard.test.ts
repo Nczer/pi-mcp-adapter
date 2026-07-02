@@ -121,12 +121,8 @@ describe("guardMcpOutput", () => {
     expect(guarded.mcpResult).toBe(rawMcpResult);
   });
 
-  it("omits details when disabled with disabledMcpResult=omit", async () => {
-    const rawMcpResult = { content: [], isError: false };
-    const guarded = await guardMcpOutput(
-      [{ type: "text", text: "x" }],
-      { enabled: false, rawMcpResult, disabledMcpResult: "omit" },
-    );
+  it("returns no mcpResult when rawMcpResult is not provided", async () => {
+    const guarded = await guardMcpOutput([{ type: "text", text: "x" }], {});
     expect(guarded.mcpResult).toBeUndefined();
   });
 });

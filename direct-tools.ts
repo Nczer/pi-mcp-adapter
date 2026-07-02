@@ -389,7 +389,7 @@ export function createDirectToolExecutor(
 
       if (result.isError) {
         const schemaText = spec.inputSchema ? `\n\nExpected parameters:\n${formatSchema(spec.inputSchema)}` : "";
-        const guarded = await guardMcpOutput(outputContent, { ...outputGuardOptions, prefix: "Error: ", suffix: schemaText, rawMcpResult: result, disabledMcpResult: "omit" });
+        const guarded = await guardMcpOutput(outputContent, { ...outputGuardOptions, prefix: "Error: ", suffix: schemaText });
         return {
           content: guarded.content,
           details: { error: "tool_error", server: spec.serverName, ...guardedMcpDetails(guarded) },
@@ -400,14 +400,14 @@ export function createDirectToolExecutor(
         const uiMessage = uiSession?.reused
           ? "Updated the open UI."
           : "📺 Interactive UI is now open in your browser. I'll respond to your prompts and intents as you interact with it.";
-        const guarded = await guardMcpOutput(outputContent, { ...outputGuardOptions, suffix: `\n\n${uiMessage}`, rawMcpResult: result, disabledMcpResult: "omit" });
+        const guarded = await guardMcpOutput(outputContent, { ...outputGuardOptions, suffix: `\n\n${uiMessage}` });
         return {
           content: guarded.content,
           details: { server: spec.serverName, tool: spec.originalName, uiOpen: true, ...guardedMcpDetails(guarded) },
         };
       }
 
-      const guarded = await guardMcpOutput(outputContent, { ...outputGuardOptions, rawMcpResult: result, disabledMcpResult: "omit" });
+      const guarded = await guardMcpOutput(outputContent, { ...outputGuardOptions });
       return {
         content: guarded.content,
         details: { server: spec.serverName, tool: spec.originalName, ...guardedMcpDetails(guarded) },

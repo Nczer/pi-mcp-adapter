@@ -47,9 +47,13 @@ export interface McpOutputGuardOptions {
   maxBytes?: number;
   maxLines?: number;
   detailsMaxBytes?: number;
+  /**
+   * Raw MCP result to expose as details.mcpResult. Kept raw when its JSON
+   * fits detailsMaxBytes (or when the guard is disabled); otherwise replaced
+   * with a compact summary and spilled to a temp file. Omit for call sites
+   * whose details never carried the raw result (e.g. direct tools).
+   */
   rawMcpResult?: unknown;
-  /** How to expose rawMcpResult in details when the guard is disabled. */
-  disabledMcpResult?: "raw" | "omit";
 }
 
 export interface GuardedMcpOutput {
@@ -99,7 +103,7 @@ export async function guardMcpOutput(
   if (options.enabled === false) {
     return {
       content: addAffixes(normalizedContent, prefix, suffix),
-      mcpResult: options.disabledMcpResult === "omit" ? undefined : options.rawMcpResult,
+      mcpResult: options.rawMcpResult,
     };
   }
 
