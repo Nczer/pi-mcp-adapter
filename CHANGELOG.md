@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added default-on MCP output guarding with temp-file spillover for oversized text results, compact summaries for large proxy result details, and `settings.outputGuard` tuning. Thanks @tmustier for PR #160.
 
 ### Fixed
+- Kept multiline/control MCP panel metadata from corrupting rows and made Keep & Close save dirty changes. Thanks @gpmarques for PR #14 and @markokocic for PR #135.
 - Preserved `--` separators when resolving `npx` wrapper commands so subcommand flags are not consumed by tools like `dotenv-cli`.
 - Merged partial per-server Pi overrides into imported MCP server definitions instead of replacing the full server entry.
 - Fixed the `pi-mcp-adapter` bin entrypoint when invoked through installed symlinks, so `init` runs instead of silently exiting.
