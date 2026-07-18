@@ -153,6 +153,14 @@ export async function initializeMcp(
     }
   });
 
+  try {
+    void ctx.hasUI;
+  } catch {
+    // Session torn down while the eager/keep-alive connect(s) above were still
+    // in flight — abandon quietly instead of touching a dead ctx below.
+    return state;
+  }
+
   for (const { name, definition, connection, error } of results) {
     if (error || !connection) {
       if (ctx.hasUI) {
