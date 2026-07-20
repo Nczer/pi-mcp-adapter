@@ -55,6 +55,7 @@
     "ui-stream-types.ts",
     "config.ts",
     "server-manager.ts",
+    "session-recovery.ts",
     "sampling-handler.ts",
     "elicitation-handler.ts",
     "tool-registrar.ts",

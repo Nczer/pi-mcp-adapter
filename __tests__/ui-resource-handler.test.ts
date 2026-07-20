@@ -36,6 +36,47 @@ describe("UiResourceHandler", () => {
       await expect(handler.readUiResource("server", "ui://test/widget")).rejects.toBe(error);
     });
 
+    it("recovers a terminated HTTP session while loading a UI resource", async () => {
+      const { StreamableHTTPError } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+      const stale = {
+        status: "connected" as const,
+        transport: { sessionId: "session-1" },
+        client: {
+          readResource: vi.fn().mockRejectedValueOnce(new StreamableHTTPError(404, "Session not found")),
+        },
+        resources: [],
+      };
+      const fresh = {
+        status: "connected" as const,
+        transport: { sessionId: "session-2" },
+        client: {
+          readResource: vi.fn().mockResolvedValue({
+            contents: [{ uri: "ui://test/widget", mimeType: "text/html", text: "<h1>Recovered</h1>" }],
+          }),
+        },
+        resources: [],
+      };
+      const manager = createMockManager({
+        getConnection: vi.fn().mockReturnValue(stale),
+        reconnect: vi.fn().mockResolvedValue(fresh),
+        getRequestOptions: vi.fn().mockReturnValue(undefined),
+        touch: vi.fn(),
+        incrementInFlight: vi.fn(),
+        decrementInFlight: vi.fn(),
+      });
+      const config = { mcpServers: { server: { url: "https://example.test/mcp" } } };
+      const handler = new UiResourceHandler(manager);
+
+      const result = await handler.readUiResource("server", "ui://test/widget", { config });
+
+      expect(result.html).toBe("<h1>Recovered</h1>");
+      expect(stale.client.readResource).toHaveBeenCalledTimes(1);
+      expect(fresh.client.readResource).toHaveBeenCalledTimes(1);
+      expect(manager.reconnect).toHaveBeenCalledWith("server", config.mcpServers.server, stale);
+      expect(manager.incrementInFlight).toHaveBeenCalledWith("server");
+      expect(manager.decrementInFlight).toHaveBeenCalledWith("server");
+    });
+
     it("reads and returns HTML from text content", async () => {
       const manager = createMockManager({
         readResource: vi.fn().mockResolvedValue({

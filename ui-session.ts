@@ -14,6 +14,7 @@ import {
 import { logger } from "./logger.ts";
 import { startUiServer, type UiServerHandle } from "./ui-server.ts";
 import { isGlimpseAvailable, openGlimpseWindow } from "./glimpse-ui.ts";
+import type { SessionRecoveryDeps } from "./session-recovery.ts";
 
 let activeGlimpseWindow: { close(): void } | null = null;
 
@@ -23,6 +24,8 @@ export interface UiSessionRequest {
   toolArgs: Record<string, unknown>;
   uiResourceUri: string;
   streamMode?: UiStreamMode;
+  signal?: AbortSignal;
+  onNeedsAuth?: SessionRecoveryDeps["onNeedsAuth"];
 }
 
 export interface UiSessionRuntime {
@@ -170,7 +173,11 @@ export async function maybeStartUiSession(
       };
     }
 
-    const resource = await state.uiResourceHandler.readUiResource(request.serverName, request.uiResourceUri);
+    const resource = await state.uiResourceHandler.readUiResource(request.serverName, request.uiResourceUri, {
+      config: state.config,
+      signal: request.signal,
+      onNeedsAuth: request.onNeedsAuth,
+    });
 
     if (state.uiServer) {
       state.uiServer.close("replaced");
@@ -211,6 +218,8 @@ export async function maybeStartUiSession(
       toolArgs: streamMode === "stream-first" ? {} : request.toolArgs,
       resource,
       manager: state.manager,
+      config: state.config,
+      onNeedsAuth: request.onNeedsAuth,
       consentManager: state.consentManager,
       hostContext,
 

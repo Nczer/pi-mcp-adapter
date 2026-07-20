@@ -34,6 +34,13 @@ vi.mock("@modelcontextprotocol/sdk/client/stdio.js", () => ({
 
 vi.mock("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
   StreamableHTTPClientTransport: vi.fn(),
+  StreamableHTTPError: class StreamableHTTPError extends Error {
+    code: number;
+    constructor(code: number, message: string) {
+      super(`Streamable HTTP error: ${message}`);
+      this.code = code;
+    }
+  },
 }));
 
 vi.mock("@modelcontextprotocol/sdk/client/sse.js", () => ({
