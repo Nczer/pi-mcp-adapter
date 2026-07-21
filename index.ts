@@ -67,13 +67,22 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     || directSpecs.length === 0
     || missingConfiguredDirectToolServers.length > 0;
 
+  // OMP remaps `typebox` to a host shim that historically lacked Type.Unsafe.
+  // Prefer Unsafe when present (real TypeBox / fixed OMP shim); otherwise pass
+  // the normalized JSON Schema through as a plain object so toolWireSchema and
+  // validateToolArguments still treat it as JSON Schema.
+  const toToolParameters = (schema: Record<string, unknown>) =>
+    typeof (Type as { Unsafe?: (value: never) => unknown }).Unsafe === "function"
+      ? (Type as { Unsafe: (value: never) => unknown }).Unsafe(schema as never)
+      : schema;
+
   for (const spec of directSpecs) {
     (pi.registerTool as (tool: unknown) => unknown)({
       name: spec.prefixedName,
       label: `MCP: ${spec.originalName}`,
       description: spec.description || "(no description)",
       promptSnippet: truncateAtWord(spec.description, 100) || `MCP tool from ${spec.serverName}`,
-      parameters: Type.Unsafe(normalizeDirectToolInputSchema(spec.inputSchema) as never),
+      parameters: toToolParameters(normalizeDirectToolInputSchema(spec.inputSchema)),
       execute: createDirectToolExecutor(() => state, () => initPromise, spec),
       renderCall: createMcpDirectToolCallRenderer(spec.prefixedName),
       renderResult: renderMcpToolResult,
