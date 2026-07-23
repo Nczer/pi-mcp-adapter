@@ -2,8 +2,9 @@ import { RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/app-bridge";
 import { UrlElicitationRequiredError, type ReadResourceResult } from "@modelcontextprotocol/sdk/types.js";
 import { ResourceFetchError, ResourceParseError } from "./errors.ts";
 import { logger } from "./logger.ts";
+import { SessionRecoveryAuthRequiredError, withSessionRecovery, type SessionRecoveryDeps } from "./session-recovery.ts";
 import type { McpServerManager } from "./server-manager.ts";
-import type { UiResourceContent, UiResourceMeta } from "./types.ts";
+import type { McpConfig, UiResourceContent, UiResourceMeta } from "./types.ts";
 
 interface ResourceContentRecord {
   uri?: string;
@@ -13,12 +14,18 @@ interface ResourceContentRecord {
   _meta?: Record<string, unknown>;
 }
 
+interface ReadUiResourceOptions {
+  config?: McpConfig;
+  signal?: AbortSignal;
+  onNeedsAuth?: SessionRecoveryDeps["onNeedsAuth"];
+}
+
 export class UiResourceHandler {
   private log = logger.child({ component: "UiResourceHandler" });
 
-  constructor(private manager: McpServerManager) {}
+  constructor(private manager: McpServerManager, private config?: McpConfig) {}
 
-  async readUiResource(serverName: string, uri: string): Promise<UiResourceContent> {
+  async readUiResource(serverName: string, uri: string, options: ReadUiResourceOptions = {}): Promise<UiResourceContent> {
     const log = this.log.child({ server: serverName, uri });
 
     if (!uri.startsWith("ui://")) {
@@ -29,9 +36,25 @@ export class UiResourceHandler {
 
     let result: ReadResourceResult;
     try {
-      result = await this.manager.readResource(serverName, uri);
+      const config = options.config ?? this.config;
+      if (config) {
+        this.manager.touch(serverName);
+        this.manager.incrementInFlight(serverName);
+        try {
+          result = await withSessionRecovery(
+            { manager: this.manager, config, signal: options.signal, onNeedsAuth: options.onNeedsAuth },
+            serverName,
+            (connection) => connection.client.readResource({ uri }, this.manager.getRequestOptions(serverName, options.signal)),
+          );
+        } finally {
+          this.manager.decrementInFlight(serverName);
+          this.manager.touch(serverName);
+        }
+      } else {
+        result = await this.manager.readResource(serverName, uri, options.signal);
+      }
     } catch (error) {
-      if (error instanceof UrlElicitationRequiredError) throw error;
+      if (error instanceof UrlElicitationRequiredError || error instanceof SessionRecoveryAuthRequiredError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       log.error("Failed to read resource", error instanceof Error ? error : undefined);
       throw new ResourceFetchError(uri, message, {

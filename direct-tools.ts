@@ -14,6 +14,7 @@ import { formatToolName, isToolExcluded } from "./types.ts";
 import { resourceNameToToolName } from "./resource-tools.ts";
 import { authenticate, supportsOAuth } from "./mcp-auth-flow.ts";
 import { formatAuthRequiredMessage, truncateAtWord } from "./utils.ts";
+import { SessionRecoveryAuthRequiredError, withSessionRecovery } from "./session-recovery.ts";
 
 const BUILTIN_NAMES = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "mcp"]);
 const INSTRUCTIONS_SNIPPET_LENGTH = 150;
@@ -361,13 +362,40 @@ export function createDirectToolExecutor(
     const requestOptions = state.manager.getRequestOptions?.(spec.serverName, signal) ?? (signal ? { signal } : undefined);
 
     const outputGuardOptions = resolveMcpOutputGuardOptions(state.config.settings);
+    const recoverAuthConnection = async () => {
+      const current = state.manager.getConnection(spec.serverName);
+      if (current?.status === "connected") return current;
+
+      if (!autoAuthAttempted) {
+        autoAuthAttempted = true;
+        const autoAuth = await attemptDirectAutoAuth(state, spec.serverName);
+        if (autoAuth.status === "failed") {
+          throw new SessionRecoveryAuthRequiredError(spec.serverName, autoAuth.message);
+        }
+        if (autoAuth.status === "success") {
+          const afterAuth = state.manager.getConnection(spec.serverName);
+          if (afterAuth?.status === "connected") return afterAuth;
+          if (afterAuth?.status === "needs-auth") {
+            await state.manager.close(spec.serverName);
+          }
+          state.failureTracker.delete(spec.serverName);
+          const reconnected = await lazyConnect(state, spec.serverName, signal);
+          return reconnected ? state.manager.getConnection(spec.serverName) : undefined;
+        }
+      }
+      return state.manager.getConnection(spec.serverName);
+    };
 
     try {
       state.manager.touch(spec.serverName);
       state.manager.incrementInFlight(spec.serverName);
 
       if (spec.resourceUri) {
-        const result = await connection.client.readResource({ uri: spec.resourceUri }, requestOptions);
+        const result = await withSessionRecovery(
+          { manager: state.manager, config: state.config, signal, onNeedsAuth: recoverAuthConnection },
+          spec.serverName,
+          (conn) => conn.client.readResource({ uri: spec.resourceUri! }, requestOptions),
+        );
         const content = (result.contents ?? []).map(c => ({
           type: "text" as const,
           text: "text" in c ? c.text : ("blob" in c ? `[Binary data: ${(c as { mimeType?: string }).mimeType ?? "unknown"}]` : JSON.stringify(c)),
@@ -387,16 +415,20 @@ export function createDirectToolExecutor(
             toolArgs: params ?? {},
             uiResourceUri: spec.uiResourceUri!,
             streamMode: spec.uiStreamMode,
+            signal,
+            onNeedsAuth: recoverAuthConnection,
           })
         : null;
 
-      const resultPromise = connection.client.callTool({
-        name: spec.originalName,
-        arguments: params ?? {},
-        _meta: uiSession?.requestMeta,
-      }, undefined, requestOptions);
-
-      const result = await abortable(resultPromise, signal);
+      const result = await withSessionRecovery(
+        { manager: state.manager, config: state.config, signal, onNeedsAuth: recoverAuthConnection },
+        spec.serverName,
+        (conn) => abortable(conn.client.callTool({
+          name: spec.originalName,
+          arguments: params ?? {},
+          _meta: uiSession?.requestMeta,
+        }, undefined, requestOptions), signal),
+      );
       uiSession?.sendToolResult(result as unknown as import("@modelcontextprotocol/sdk/types.js").CallToolResult);
 
       if (result.isError) {
@@ -430,6 +462,14 @@ export function createDirectToolExecutor(
         details: { server: spec.serverName, tool: spec.originalName, ...guardedMcpDetails(guarded) },
       };
     } catch (error) {
+      if (error instanceof SessionRecoveryAuthRequiredError) {
+        const message = error.authMessage ?? getDirectAuthRequiredMessage(state, spec.serverName);
+        uiSession?.sendToolCancelled(message);
+        return {
+          content: [{ type: "text" as const, text: message }],
+          details: { error: "auth_required", server: spec.serverName, message, autoAuthAttempted },
+        };
+      }
       if (error instanceof UrlElicitationRequiredError) {
         const action = await state.manager.handleUrlElicitationRequired(spec.serverName, error);
         const message = action === "accept"

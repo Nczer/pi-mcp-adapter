@@ -9,12 +9,15 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { ConsentManager } from "./consent-manager.ts";
 import { ServerError, wrapError } from "./errors.ts";
+import { formatAuthRequiredMessage } from "./utils.ts";
 import { buildHostHtmlTemplate, buildCspMetaContent, applyCspMeta } from "./host-html-template.ts";
 import { logger } from "./logger.ts";
 import type { McpServerManager } from "./server-manager.ts";
+import { SessionRecoveryAuthRequiredError, withSessionRecovery, type SessionRecoveryDeps } from "./session-recovery.ts";
 import {
   extractUiPromptText,
   getVisualizationStreamEnvelope,
+  type McpConfig,
   type UiDisplayMode,
   type UiDisplayModeRequest,
   type UiDisplayModeResult,
@@ -40,6 +43,15 @@ export interface UiServerOptions {
   toolArgs: Record<string, unknown>;
   resource: UiResourceContent;
   manager: McpServerManager;
+  /**
+   * Live extension config, used to re-read the server definition when
+   * recovering a terminated Streamable HTTP session (see
+   * session-recovery.ts). Optional so existing embedders/tests that don't
+   * need session recovery aren't forced to supply it; without it, proxied
+   * tool calls run without recovery (unchanged pre-existing behavior).
+   */
+  config?: McpConfig;
+  onNeedsAuth?: SessionRecoveryDeps["onNeedsAuth"];
   consentManager: ConsentManager;
   hostContext?: UiHostContext;
   initialResultPromise?: Promise<CallToolResult>;
@@ -340,13 +352,20 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
         try {
           options.manager.touch(options.serverName);
           options.manager.incrementInFlight(options.serverName);
-          const result = await connection.client.callTool({
+          const callArgs = {
             name: callParams.name,
             arguments:
               callParams.arguments && typeof callParams.arguments === "object" && !Array.isArray(callParams.arguments)
                 ? callParams.arguments
                 : {},
-          }, undefined, options.manager.getRequestOptions?.(options.serverName));
+          };
+          const result = options.config
+            ? await withSessionRecovery(
+                { manager: options.manager, config: options.config, onNeedsAuth: options.onNeedsAuth },
+                options.serverName,
+                (conn) => conn.client.callTool(callArgs, undefined, options.manager.getRequestOptions?.(options.serverName)),
+              )
+            : await connection.client.callTool(callArgs, undefined, options.manager.getRequestOptions?.(options.serverName));
           sendJson(res, 200, { ok: true, result });
         } finally {
           options.manager.decrementInFlight(options.serverName);
@@ -458,6 +477,14 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
 
       sendJson(res, 404, { ok: false, error: "Not found" });
     } catch (error) {
+      if (error instanceof SessionRecoveryAuthRequiredError) {
+        const fallback = `Server "${options.serverName}" requires OAuth authentication. Run mcp({ action: "auth-start", server: "${options.serverName}" }) to get a browser URL, or /mcp-auth ${options.serverName} in an interactive local session.`;
+        const message = error.authMessage ?? (options.config
+          ? formatAuthRequiredMessage(options.config, options.serverName, fallback)
+          : fallback);
+        sendJson(res, 401, { ok: false, error: message });
+        return;
+      }
       const wrapped = wrapError(error, { server: options.serverName, tool: options.toolName });
       const status = /approval required|denied/i.test(wrapped.message) ? 403 : 500;
       if (status === 500) {

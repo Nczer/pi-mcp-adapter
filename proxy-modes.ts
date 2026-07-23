@@ -12,6 +12,7 @@ import { guardMcpOutput, guardedMcpDetails, resolveMcpOutputGuardOptions } from 
 import { maybeStartUiSession, type UiSessionRuntime } from "./ui-session.ts";
 import { formatAuthRequiredMessage, truncateAtWord } from "./utils.ts";
 import { authenticate, completeAuthFromInput, startAuth, supportsOAuth } from "./mcp-auth-flow.ts";
+import { SessionRecoveryAuthRequiredError, withSessionRecovery } from "./session-recovery.ts";
 
 type ProxyToolResult = AgentToolResult<Record<string, unknown>>;
 
@@ -883,13 +884,42 @@ export async function executeCall(
   const requestOptions = state.manager.getRequestOptions?.(serverName, signal) ?? (signal ? { signal } : undefined);
 
   const outputGuardOptions = resolveMcpOutputGuardOptions(state.config.settings);
+  const recoverAuthConnection = async () => {
+    const current = state.manager.getConnection(serverName);
+    if (current?.status === "connected") return current;
+
+    if (!autoAuthAttempted) {
+      autoAuthAttempted = true;
+      const autoAuth = await attemptAutoAuth(state, serverName);
+      if (autoAuth.status === "failed") {
+        throw new SessionRecoveryAuthRequiredError(serverName, autoAuth.message);
+      }
+      if (autoAuth.status === "success") {
+        const definition = state.config.mcpServers[serverName];
+        if (!definition) return undefined;
+        const afterAuth = state.manager.getConnection(serverName);
+        if (afterAuth?.status === "connected") return afterAuth;
+        if (afterAuth?.status === "needs-auth") {
+          await state.manager.close(serverName);
+        }
+        state.failureTracker.delete(serverName);
+        connection = await state.manager.connect(serverName, definition, signal);
+        return connection;
+      }
+    }
+    return state.manager.getConnection(serverName);
+  };
 
   try {
     state.manager.touch(serverName);
     state.manager.incrementInFlight(serverName);
 
     if (toolMeta.resourceUri) {
-      const result = await connection.client.readResource({ uri: toolMeta.resourceUri }, requestOptions);
+      const result = await withSessionRecovery(
+        { manager: state.manager, config: state.config, signal, onNeedsAuth: recoverAuthConnection },
+        serverName,
+        (conn) => conn.client.readResource({ uri: toolMeta.resourceUri! }, requestOptions),
+      );
       const content = (result.contents ?? []).map(c => ({
         type: "text" as const,
         text: "text" in c ? c.text : ("blob" in c ? `[Binary data: ${(c as { mimeType?: string }).mimeType ?? "unknown"}]` : JSON.stringify(c)),
@@ -908,17 +938,22 @@ export async function executeCall(
           toolArgs: args ?? {},
           uiResourceUri: toolMeta.uiResourceUri,
           streamMode: toolMeta.uiStreamMode,
+          signal,
+          onNeedsAuth: recoverAuthConnection,
         })
       : null;
 
-    const resultPromise = connection.client.callTool({
-      name: toolMeta.originalName,
-      arguments: args ?? {},
-      _meta: uiSession?.requestMeta,
-    }, undefined, requestOptions);
+    const result = await withSessionRecovery(
+      { manager: state.manager, config: state.config, signal, onNeedsAuth: recoverAuthConnection },
+      serverName,
+      (conn) => abortable(conn.client.callTool({
+        name: toolMeta.originalName,
+        arguments: args ?? {},
+        _meta: uiSession?.requestMeta,
+      }, undefined, requestOptions), signal),
+    );
 
     if (toolMeta.uiResourceUri) {
-      const result = await abortable(resultPromise, signal);
       uiSession?.sendToolResult(result as unknown as import("@modelcontextprotocol/sdk/types.js").CallToolResult);
 
       if (result.isError) {
@@ -945,8 +980,6 @@ export async function executeCall(
       };
     }
 
-    const result = await abortable(resultPromise, signal);
-
     if (result.isError) {
       const mcpContent = (result.content ?? []) as McpContent[];
       const content = transformMcpContent(mcpContent);
@@ -967,6 +1000,14 @@ export async function executeCall(
       details: { mode: "call", ...guardedMcpDetails(guarded), server: serverName, tool: toolMeta.originalName },
     };
   } catch (error) {
+    if (error instanceof SessionRecoveryAuthRequiredError) {
+      const message = error.authMessage ?? getAuthRequiredMessage(state, serverName);
+      uiSession?.sendToolCancelled(message);
+      return {
+        content: [{ type: "text" as const, text: message }],
+        details: { mode: "call", error: "auth_required", server: serverName, message, autoAuthAttempted },
+      };
+    }
     if (error instanceof UrlElicitationRequiredError) {
       const action = await state.manager.handleUrlElicitationRequired(serverName, error);
       const message = action === "accept"

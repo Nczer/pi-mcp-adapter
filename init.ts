@@ -60,7 +60,7 @@ export async function initializeMcp(
   const toolMetadata = new Map<string, ToolMetadata[]>();
   const serverInstructions = new Map<string, string>();
   const failureTracker = new Map<string, number>();
-  const uiResourceHandler = new UiResourceHandler(manager);
+  const uiResourceHandler = new UiResourceHandler(manager, config);
   const consentManager = new ConsentManager("once-per-server");
   const ui = ctx.hasUI ? ctx.ui : undefined;
   const state: McpExtensionState = {

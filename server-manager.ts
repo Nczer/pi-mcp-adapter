@@ -30,7 +30,7 @@ import {
 import { interpolateEnvRecord, resolveBearerToken, resolveConfigPath } from "./utils.ts";
 import { abortable, throwIfAborted } from "./abort.ts";
 
-interface ServerConnection {
+export interface ServerConnection {
   client: Client;
   transport: Transport;
   definition: ServerDefinition;
@@ -47,6 +47,7 @@ type UiStreamListener = (serverName: string, notification: ServerStreamResultPat
 export class McpServerManager {
   private connections = new Map<string, ServerConnection>();
   private connectPromises = new Map<string, Promise<ServerConnection>>();
+  private reconnectPromises = new Map<string, Promise<ServerConnection>>();
   private uiStreamListeners = new Map<string, UiStreamListener>();
   private samplingConfig: ServerSamplingConfig | undefined;
   private elicitationConfig: ServerElicitationConfig | undefined;
@@ -122,6 +123,57 @@ export class McpServerManager {
     }
   }
 
+  /**
+   * Reconnect a server whose connection was proven stale (e.g. by a 404
+   * "session no longer exists" response). Single-flight per server name —
+   * concurrent callers that raced to the same failure share one reconnect —
+   * and identity-guarded: `staleConnection` is only torn down if it is
+   * still the manager's current connection for `name`. If a concurrent
+   * reconnect (or an unrelated connect()) already replaced it with a fresh
+   * connection, that fresh connection is returned untouched.
+   */
+  async reconnect(
+    name: string,
+    definition: ServerDefinition,
+    staleConnection: ServerConnection,
+    signal?: AbortSignal,
+  ): Promise<ServerConnection> {
+    throwIfAborted(signal);
+    const inFlight = this.reconnectPromises.get(name);
+    if (inFlight) {
+      return abortable(inFlight, signal);
+    }
+
+    const promise = this.doReconnect(name, definition, staleConnection).finally(() => {
+      if (this.reconnectPromises.get(name) === promise) {
+        this.reconnectPromises.delete(name);
+      }
+    });
+    this.reconnectPromises.set(name, promise);
+    return abortable(promise, signal);
+  }
+
+  private async doReconnect(
+    name: string,
+    definition: ServerDefinition,
+    staleConnection: ServerConnection,
+  ): Promise<ServerConnection> {
+    const current = this.connections.get(name);
+
+    // Never tear down a connection we didn't prove stale: if the map no
+    // longer holds the connection we were asked to replace, someone else
+    // already reconnected (or connected) first.
+    if (current !== staleConnection) {
+      return current ?? this.connect(name, definition);
+    }
+
+    const staleInFlight = staleConnection.inFlight;
+    await this.close(name);
+    const fresh = await this.connect(name, definition);
+    fresh.inFlight = Math.max(fresh.inFlight, staleInFlight);
+    return fresh;
+  }
+
   private async createConnection(
     name: string,
     definition: ServerDefinition,
@@ -165,23 +217,43 @@ export class McpServerManager {
       await client.connect(transport, requestOptions);
       this.attachAdapterNotificationHandlers(name, client);
 
-      // Discover tools and resources
-      const [tools, resources] = await Promise.all([
-        this.fetchAllTools(client, requestOptions),
-        this.fetchAllResources(client, requestOptions),
-      ]);
-
-      return {
+      const connection: ServerConnection = {
         client,
         transport,
         definition,
-        tools,
-        resources,
+        tools: [],
+        resources: [],
         instructions: client.getInstructions?.(),
         lastUsedAt: Date.now(),
         inFlight: 0,
         status: "connected",
       };
+
+      // Reflect the SDK's own close signal in connection status, guarded by
+      // identity so a stale connection's late close (e.g. the old
+      // connection from before a session-recovery reconnect) can never
+      // clobber a fresh connection that has since taken its place in
+      // `this.connections`. This intentionally uses `client.onclose`
+      // (Protocol's public hook), not `transport.onclose` — the SDK's
+      // Protocol takes ownership of that one internally for pending-request
+      // rejection, and overwriting it would break that. `client.onerror` is
+      // avoided too: it can fire on benign events (e.g. the optional GET
+      // SSE stream failing) that don't mean the connection is closed.
+      client.onclose = () => {
+        if (this.connections.get(name) === connection) {
+          connection.status = "closed";
+        }
+      };
+
+      // Discover tools and resources
+      const [tools, resources] = await Promise.all([
+        this.fetchAllTools(client, requestOptions),
+        this.fetchAllResources(client, requestOptions),
+      ]);
+      connection.tools = tools;
+      connection.resources = resources;
+
+      return connection;
     } catch (error) {
       // Check for UnauthorizedError - server requires OAuth
       if (error instanceof UnauthorizedError && supportsOAuth(definition)) {
