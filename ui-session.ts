@@ -28,6 +28,8 @@ export interface UiSessionRequest {
   onNeedsAuth?: SessionRecoveryDeps["onNeedsAuth"];
 }
 
+export type UiSessionViewer = "browser" | "glimpse" | "suppressed";
+
 export interface UiSessionRuntime {
   serverName: string;
   toolName: string;
@@ -37,11 +39,48 @@ export interface UiSessionRuntime {
   streamMode?: UiStreamMode;
   requestMeta?: Record<string, unknown>;
   url: string;
+  viewer: UiSessionViewer;
+  windowOpen: boolean;
   isActive: () => boolean;
   sendToolResult: (result: CallToolResult) => void;
   sendResultPatch: (result: CallToolResult) => void;
   sendToolCancelled: (reason: string) => void;
   close: (reason?: string) => void;
+}
+
+export interface UiSessionResultSummary {
+  message: string;
+  uiOpen: boolean;
+  uiViewer?: UiSessionViewer;
+  uiUrl?: string;
+}
+
+export function summarizeUiSessionResult(uiSession: UiSessionRuntime | null): UiSessionResultSummary {
+  if (!uiSession) {
+    return {
+      message: "Interactive UI was unavailable; returning the tool result inline.",
+      uiOpen: false,
+    };
+  }
+
+  if (!uiSession.windowOpen) {
+    const action = uiSession.reused ? "Updated the suppressed MCP UI session." : "MCP UI window was suppressed.";
+    return {
+      message: `${action} Open manually: ${uiSession.url}`,
+      uiOpen: false,
+      uiViewer: uiSession.viewer,
+      uiUrl: uiSession.url,
+    };
+  }
+
+  return {
+    message: uiSession.reused
+      ? "Updated the open UI."
+      : "Interactive UI is open. I'll respond to your prompts and intents as you interact with it.",
+    uiOpen: true,
+    uiViewer: uiSession.viewer,
+    uiUrl: uiSession.url,
+  };
 }
 
 const MAX_COMPLETED_SESSIONS = 10;
@@ -141,6 +180,8 @@ export async function maybeStartUiSession(
         streamMode,
         requestMeta: streamToken ? { [UI_STREAM_REQUEST_META_KEY]: streamToken } : undefined,
         url: existingHandle.url,
+        viewer: existingHandle.viewer ?? "browser",
+        windowOpen: existingHandle.windowOpen ?? true,
         isActive: () => active && state.uiServer === existingHandle,
         sendToolResult: (result: CallToolResult) => {
           if (!active || state.uiServer !== existingHandle) return;
@@ -325,31 +366,48 @@ export async function maybeStartUiSession(
 
     state.uiServer = handle;
 
-    const glimpseDetected = isGlimpseAvailable();
     const viewerPref = process.env.MCP_UI_VIEWER?.toLowerCase();
-    const useGlimpse = viewerPref === "glimpse" ||
-      (viewerPref !== "browser" && glimpseDetected);
+    const uiSuppressed = viewerPref === "none" || viewerPref === "off" || viewerPref === "disabled";
 
-    if (useGlimpse) {
-      try {
-        const glimpseHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{margin:0;padding:0;width:100vw;height:100vh;overflow:hidden}iframe{width:100%;height:100%;border:none}</style></head><body><iframe src="${handle.url}"></iframe></body></html>`;
-        activeGlimpseWindow = await openGlimpseWindow(glimpseHtml, {
-          title: `MCP · ${request.serverName} · ${request.toolName}`,
-          width: 1000,
-          height: 800,
-          onClosed: () => {
-            if (active) handle.close("glimpse-closed");
-          },
-        });
-      } catch (error) {
-        log.debug("Glimpse unavailable, using browser", {
-          error: error instanceof Error ? error.message : String(error),
-        });
+    let viewer: UiSessionViewer = "browser";
+    let windowOpen = true;
+
+    if (uiSuppressed) {
+      viewer = "suppressed";
+      windowOpen = false;
+      state.ui?.notify(`MCP UI window suppressed (MCP_UI_VIEWER=${viewerPref}). Open manually: ${handle.url}`, "info");
+      log.info("Suppressing MCP UI window (MCP_UI_VIEWER=" + viewerPref + ")", { url: handle.url });
+    } else {
+      const glimpseDetected = isGlimpseAvailable();
+      const useGlimpse = viewerPref === "glimpse" ||
+        (viewerPref !== "browser" && glimpseDetected);
+
+      if (useGlimpse) {
+        try {
+          const glimpseHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{margin:0;padding:0;width:100vw;height:100vh;overflow:hidden}iframe{width:100%;height:100%;border:none}</style></head><body><iframe src="${handle.url}"></iframe></body></html>`;
+          activeGlimpseWindow = await openGlimpseWindow(glimpseHtml, {
+            title: `MCP · ${request.serverName} · ${request.toolName}`,
+            width: 1000,
+            height: 800,
+            onClosed: () => {
+              if (active) handle.close("glimpse-closed");
+            },
+          });
+          viewer = "glimpse";
+        } catch (error) {
+          log.debug("Glimpse unavailable, using browser", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          await openInBrowser(state, handle.url);
+          viewer = "browser";
+        }
+      } else {
         await openInBrowser(state, handle.url);
       }
-    } else {
-      await openInBrowser(state, handle.url);
     }
+
+    handle.viewer = viewer;
+    handle.windowOpen = windowOpen;
 
     return {
       serverName: request.serverName,
@@ -360,6 +418,8 @@ export async function maybeStartUiSession(
       streamMode,
       requestMeta: streamToken ? { [UI_STREAM_REQUEST_META_KEY]: streamToken } : undefined,
       url: handle.url,
+      viewer,
+      windowOpen,
       isActive: () => active && state.uiServer === handle,
       sendToolResult: (result: CallToolResult) => {
         if (!active || state.uiServer !== handle) return;
