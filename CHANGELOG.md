@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deferred loading the regex safety checker until regex search is used, improving startup time. Thanks @kaushikgopal for PR #175.
 
 ### Fixed
+- Kept manual OAuth `auth-start` / `auth-complete` flows from being invalidated by keep-alive health checks, and made reserved manual callback states show a manual completion page instead of a CSRF error. Thanks @oozle for issue #207.
 - Accepted object-valued `mcp.args` in addition to JSON strings, avoiding double-encoded tool arguments while preserving provider-compatible string calls. Thanks @johnny-smitherson for issue #205.
 - Collapsed long single-line MCP results according to terminal-wrapped visual lines. Thanks @xz-dev for PR #181.
 - Recovered Streamable HTTP MCP sessions after a server restart invalidates the previous session ID. Thanks @damselem for PR #194.

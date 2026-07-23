@@ -1,5 +1,6 @@
 import type { ServerDefinition } from "./types.ts";
 import type { McpServerManager } from "./server-manager.ts";
+import { hasPendingAuth } from "./mcp-auth-flow.ts";
 import { logger } from "./logger.ts";
 
 export type ReconnectCallback = (serverName: string) => void;
@@ -14,7 +15,7 @@ export class McpLifecycleManager {
   private onReconnect?: ReconnectCallback;
   private onIdleShutdown?: (serverName: string) => void;
   
-  constructor(manager: McpServerManager) {
+  constructor(manager: McpServerManager, private readonly hasPendingAuthForServer = hasPendingAuth) {
     this.manager = manager;
   }
   
@@ -57,6 +58,10 @@ export class McpLifecycleManager {
       const connection = this.manager.getConnection(name);
       
       if (!connection || connection.status !== "connected") {
+        if (this.hasPendingAuthForServer(name)) {
+          logger.debug(`Skipping reconnect for ${name} while OAuth authorization is pending`);
+          continue;
+        }
         try {
           await this.manager.connect(name, definition);
           logger.debug(`Reconnected to ${name}`);

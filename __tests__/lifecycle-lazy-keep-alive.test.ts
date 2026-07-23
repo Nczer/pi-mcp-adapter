@@ -91,6 +91,18 @@ describe("lazy-keep-alive lifecycle", () => {
     expect(fake.connectCalls).toContain("srv");
   });
 
+  it("does not reconnect keep-alive servers while OAuth authorization is pending", async () => {
+    const def = makeDefinition("keep-alive");
+    lifecycle = new McpLifecycleManager(fake as never, name => name === "srv");
+    lifecycle.registerServer("srv", def, { idleTimeout: 0 });
+    lifecycle.markKeepAlive("srv", def);
+    fake.setConnection("srv", "needs-auth");
+
+    await (lifecycle as never as { checkConnections: () => Promise<void> }).checkConnections();
+
+    expect(fake.connectCalls).not.toContain("srv");
+  });
+
   it("never idle-shuts a server registered with idleTimeout 0", async () => {
     const def = makeDefinition("lazy-keep-alive");
     lifecycle.registerServer("srv", def, { idleTimeout: 0 });

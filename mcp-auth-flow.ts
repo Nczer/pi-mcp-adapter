@@ -54,6 +54,7 @@ type PendingAuth = {
   serverName: string
   authProvider: McpOAuthProvider
   serverUrl: string
+  authorizationUrl: string
   discovery: AuthDiscovery
   authStorageOptions: AuthStorageOptions
 }
@@ -67,6 +68,13 @@ const pendingAuthentications = new Map<string, Promise<AuthStatus>>()
 
 function getPendingAuthKey(serverName: string, options: AuthStorageOptions): string {
   return `${serverName}|${getAuthBaseDir(options)}`
+}
+
+export function hasPendingAuth(serverName: string, options?: AuthStorageOptions): boolean {
+  if (options) {
+    return pendingAuths.has(getPendingAuthKey(serverName, options))
+  }
+  return Array.from(pendingAuths.values()).some(pendingAuth => pendingAuth.serverName === serverName)
 }
 
 /** Timeout for manual auth completion (5 minutes) */
@@ -230,6 +238,11 @@ export async function startAuth(
     return { authorizationUrl: "" }
   }
 
+  const existingPendingAuth = pendingAuths.get(getPendingAuthKey(serverName, authStorageOptions))
+  if (existingPendingAuth?.serverUrl === serverUrl) {
+    return { authorizationUrl: existingPendingAuth.authorizationUrl }
+  }
+
   const redirectCallback = config.redirectUri !== undefined ? parseOAuthRedirectUri(config.redirectUri) : undefined
   const oauthState = generateState()
 
@@ -282,7 +295,7 @@ export async function startAuth(
     if (!capturedUrl) {
       throw new UnauthorizedError("OAuth authorization URL was not provided")
     }
-    await setPendingAuth(serverName, { serverName, authProvider, serverUrl, discovery, authStorageOptions }, oauthState)
+    await setPendingAuth(serverName, { serverName, authProvider, serverUrl, authorizationUrl: capturedUrl.toString(), discovery, authStorageOptions }, oauthState)
     return { authorizationUrl: capturedUrl.toString() }
   } catch (error) {
     await clearPendingAuth(serverName, oauthState, authStorageOptions)

@@ -36,6 +36,25 @@ const HTML_SUCCESS = `<!DOCTYPE html>
 </body>
 </html>`
 
+const HTML_MANUAL_SUCCESS = `<!DOCTYPE html>
+<html>
+<head>
+  <title>Pi - Authorization Received</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #1a1a2e; color: #eee; }
+    .container { text-align: center; padding: 2rem; }
+    h1 { color: #4ade80; margin-bottom: 1rem; }
+    p { color: #aaa; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Authorization Received</h1>
+    <p>Copy the full callback URL from your browser address bar and paste it back into Pi with auth-complete.</p>
+  </div>
+</body>
+</html>`
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&amp;")
@@ -136,9 +155,9 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
     // Send HTTP response first before rejecting promise
     res.writeHead(200, { "Content-Type": "text/html" })
     res.end(HTML_ERROR(errorMsg))
-    reservedAuthStates.delete(state)
     // Reject promise after response is sent (defer to allow test to attach handler)
     if (pending) {
+      reservedAuthStates.delete(state)
       clearTimeout(pending.timeout)
       pendingAuths.delete(state)
       setTimeout(() => pending.reject(new Error(errorMsg)), 0)
@@ -147,7 +166,7 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
   }
 
   // Validate state parameter
-  if (!pending) {
+  if (!pending && !isReserved) {
     const errorMsg = "Invalid or expired state parameter - potential CSRF attack"
     res.writeHead(400, { "Content-Type": "text/html" })
     res.end(HTML_ERROR(errorMsg))
@@ -158,6 +177,12 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
   if (!code) {
     res.writeHead(400, { "Content-Type": "text/html" })
     res.end(HTML_ERROR("No authorization code provided"))
+    return
+  }
+
+  if (!pending) {
+    res.writeHead(200, { "Content-Type": "text/html" })
+    res.end(HTML_MANUAL_SUCCESS)
     return
   }
 

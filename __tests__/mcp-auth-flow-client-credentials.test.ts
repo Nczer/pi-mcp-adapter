@@ -574,6 +574,26 @@ describe("mcp-auth-flow explicit auth", () => {
     expect(mocks.open).toHaveBeenCalledWith(authorizationUrl);
   });
 
+  it("reuses a pending manual OAuth flow instead of starting a new one", async () => {
+    mocks.sdkAuth.mockImplementationOnce(async (provider) => {
+      await provider.redirectToAuthorization(new URL("https://auth.example.com/authorize?client_id=first"));
+      return "REDIRECT";
+    });
+    const { hasPendingAuth, startAuth } = await import("../mcp-auth-flow.ts");
+
+    const definition = {
+      url: "https://api.example.com/mcp",
+      auth: "oauth" as const,
+    };
+    const first = await startAuth("manual-repeat", "https://api.example.com/mcp", definition);
+    const second = await startAuth("manual-repeat", "https://api.example.com/mcp", definition);
+
+    expect(first.authorizationUrl).toBe("https://auth.example.com/authorize?client_id=first");
+    expect(second).toEqual(first);
+    expect(hasPendingAuth("manual-repeat")).toBe(true);
+    expect(mocks.sdkAuth).toHaveBeenCalledTimes(1);
+  });
+
   it("releases reserved callback state after direct completeAuth", async () => {
     const resourceMetadataUrl = "https://api.example.com/.well-known/oauth-protected-resource";
     mocks.fetch.mockResolvedValueOnce(new Response(null, {
