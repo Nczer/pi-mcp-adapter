@@ -482,23 +482,32 @@ export function executeList(state: McpExtensionState, server: string): ProxyTool
   const metadata = state.toolMetadata.get(server);
   const toolNames = metadata?.map(m => m.name) ?? [];
   const connection = state.manager.getConnection(server);
+  const instructions = state.serverInstructions.get(server);
+  let instructionsText = "";
+  if (instructions) {
+    const preview = truncateAtWord(instructions, INSTRUCTIONS_PREVIEW_LENGTH);
+    instructionsText = `\n\nServer instructions:\n${preview}`;
+    if (preview !== instructions) {
+      instructionsText += `\nUse mcp({ instructions: "${server}" }) for the full text.`;
+    }
+  }
 
   if (toolNames.length === 0) {
     if (connection?.status === "connected") {
       return {
-        content: [{ type: "text" as const, text: `Server "${server}" has no tools.` }],
-        details: { mode: "list", server, tools: [], count: 0 },
+        content: [{ type: "text" as const, text: `Server "${server}" has no tools.${instructionsText}` }],
+        details: { mode: "list", server, tools: [], count: 0, hasInstructions: Boolean(instructions) },
       };
     }
     if (metadata !== undefined) {
       return {
-        content: [{ type: "text" as const, text: `Server "${server}" has no cached tools (not connected).` }],
-        details: { mode: "list", server, tools: [], count: 0, cached: true },
+        content: [{ type: "text" as const, text: `Server "${server}" has no cached tools (not connected).${instructionsText}` }],
+        details: { mode: "list", server, tools: [], count: 0, cached: true, hasInstructions: Boolean(instructions) },
       };
     }
     return {
-      content: [{ type: "text" as const, text: `Server "${server}" is configured but not connected. Use mcp({ connect: "${server}" }) or /mcp reconnect ${server} to retry.` }],
-      details: { mode: "list", server, tools: [], count: 0, error: "not_connected" },
+      content: [{ type: "text" as const, text: `Server "${server}" is configured but not connected. Use mcp({ connect: "${server}" }) or /mcp reconnect ${server} to retry.${instructionsText}` }],
+      details: { mode: "list", server, tools: [], count: 0, error: "not_connected", hasInstructions: Boolean(instructions) },
     };
   }
 
@@ -520,14 +529,7 @@ export function executeList(state: McpExtensionState, server: string): ProxyTool
     text += "\n";
   }
 
-  const instructions = state.serverInstructions.get(server);
-  if (instructions) {
-    const preview = truncateAtWord(instructions, INSTRUCTIONS_PREVIEW_LENGTH);
-    text += `\nServer instructions:\n${preview}\n`;
-    if (preview !== instructions) {
-      text += `Use mcp({ instructions: "${server}" }) for the full text.\n`;
-    }
-  }
+  text += instructionsText;
 
   return {
     content: [{ type: "text" as const, text: text.trim() }],

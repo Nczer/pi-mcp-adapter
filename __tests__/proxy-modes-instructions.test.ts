@@ -5,7 +5,7 @@ import type { McpExtensionState } from "../state.ts";
 const SHORT_INSTRUCTIONS = "Call read_skill with a skill name before answering.";
 const LONG_INSTRUCTIONS = `Available skills: ${Array.from({ length: 40 }, (_, i) => `skill-${i}`).join(", ")}. Call read_skill with a skill name to load one.`;
 
-function createState(overrides: { instructions?: string; connected?: boolean } = {}): McpExtensionState {
+function createState(overrides: { instructions?: string; connected?: boolean; noTools?: boolean } = {}): McpExtensionState {
   return {
     config: {
       mcpServers: {
@@ -15,13 +15,15 @@ function createState(overrides: { instructions?: string; connected?: boolean } =
     toolMetadata: new Map([
       [
         "demo",
-        [
-          {
-            name: "demo_read_skill",
-            originalName: "read_skill",
-            description: "Read a skill listed in this server's instructions",
-          },
-        ],
+        overrides.noTools
+          ? []
+          : [
+              {
+                name: "demo_read_skill",
+                originalName: "read_skill",
+                description: "Read a skill listed in this server's instructions",
+              },
+            ],
       ],
     ]),
     serverInstructions: new Map(overrides.instructions ? [["demo", overrides.instructions]] : []),
@@ -54,6 +56,18 @@ describe("proxy instructions", () => {
 
     expect(result.content[0].text).not.toContain("Server instructions");
     expect(result.details).toMatchObject({ mode: "list", hasInstructions: false });
+  });
+
+  it("includes instructions for connected and cached servers with no visible tools", () => {
+    const connected = executeList(createState({ instructions: SHORT_INSTRUCTIONS, connected: true, noTools: true }), "demo");
+    const cached = executeList(createState({ instructions: SHORT_INSTRUCTIONS, noTools: true }), "demo");
+
+    expect(connected.content[0].text).toContain('Server "demo" has no tools');
+    expect(connected.content[0].text).toContain(`Server instructions:\n${SHORT_INSTRUCTIONS}`);
+    expect(connected.details).toMatchObject({ mode: "list", count: 0, hasInstructions: true });
+    expect(cached.content[0].text).toContain('Server "demo" has no cached tools');
+    expect(cached.content[0].text).toContain(`Server instructions:\n${SHORT_INSTRUCTIONS}`);
+    expect(cached.details).toMatchObject({ mode: "list", count: 0, hasInstructions: true });
   });
 
   it("returns the full instructions text", () => {
