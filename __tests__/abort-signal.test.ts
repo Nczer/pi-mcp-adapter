@@ -68,7 +68,7 @@ describe("AbortSignal propagation", () => {
 
     const result = await inFlight;
     expect(result.content[0].text).toContain("Failed to call tool: user cancelled");
-    expect(result.details.error).toBe("call_failed");
+    expect(result.details.error).toBe("aborted");
     expect(callTool).toHaveBeenCalledWith(
       { name: "slow", arguments: {}, _meta: undefined },
       undefined,
@@ -88,7 +88,7 @@ describe("AbortSignal propagation", () => {
 
     const result = await inFlight;
     expect(result.content[0].text).toContain("Failed to call tool: user cancelled");
-    expect(result.details.error).toBe("call_failed");
+    expect(result.details.error).toBe("aborted");
     expect(callTool).toHaveBeenCalledWith(
       { name: "slow", arguments: {}, _meta: undefined },
       undefined,

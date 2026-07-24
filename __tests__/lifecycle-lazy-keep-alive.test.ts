@@ -77,6 +77,36 @@ describe("lazy-keep-alive lifecycle", () => {
     rmSync(tempAgentDir, { recursive: true, force: true });
   });
 
+  it("does not install a health interval for an already-aborted signal", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("stopped"));
+    lifecycle.startHealthChecks(controller.signal, 1000);
+    expect((lifecycle as any).healthCheckInterval).toBeUndefined();
+  });
+
+  it("consumes health-check rejections without an unhandled rejection", async () => {
+    vi.useFakeTimers();
+    const def = makeDefinition("lazy");
+    lifecycle.registerServer("srv", def, { idleTimeout: 1 });
+    fake.setConnection("srv", "connected");
+    fake.idleResponses.set("srv", true);
+    fake.close = vi.fn(async () => { throw new Error("idle close failed \u001b]52;c;secret\u0007"); });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+
+    try {
+      lifecycle.startHealthChecks(1000);
+      await vi.advanceTimersByTimeAsync(1000);
+      await Promise.resolve();
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(consoleError).toHaveBeenCalledWith("MCP: Health check failed: idle close failed");
+    } finally {
+      process.removeListener("unhandledRejection", unhandled);
+      await lifecycle.gracefulShutdown().catch(() => {});
+    }
+  });
+
   it("reconnects after first spawn when the process dies", async () => {
     const def = makeDefinition("lazy-keep-alive");
     lifecycle.registerServer("srv", def, { idleTimeout: 0 });

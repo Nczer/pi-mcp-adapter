@@ -87,7 +87,7 @@ describe("initializeMcp vs. a ctx invalidated mid-connect", () => {
     await pending;
   });
 
-  it("still rejects unrelated ctx.hasUI failures after startup connects", async () => {
+  it("does not read guarded ctx getters again after startup connects", async () => {
     mocks.loadMcpConfig.mockReturnValue({
       mcpServers: {
         demo: { command: "npx", args: ["-y", "demo-server"], lifecycle: "eager" },
@@ -112,6 +112,6 @@ describe("initializeMcp vs. a ctx invalidated mid-connect", () => {
     armed.value = true;
     resolveConnect({ status: "connected", tools: [], resources: [] });
 
-    await expect(pending).rejects.toThrow("unexpected ui failure");
+    await pending;
   });
 });

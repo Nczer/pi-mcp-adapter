@@ -100,6 +100,7 @@ describe("direct tools auto auth", () => {
       "demo",
       "https://api.example.com/mcp",
       state.config.mcpServers.demo,
+      { signal: controller.signal },
     );
     expect(state.manager.close).toHaveBeenCalledWith("demo");
     expect(state.manager.getRequestOptions).toHaveBeenCalledWith("demo", controller.signal);
@@ -159,8 +160,47 @@ describe("direct tools auto auth", () => {
       undefined,
       requestOptions,
     );
-    expect(result.details).toMatchObject({ error: "call_failed", server: "demo" });
+    expect(result.details).toMatchObject({ error: "aborted", server: "demo" });
     expect(result.content[0].text).toContain("request aborted");
+  });
+
+  it("rethrows direct auto-auth cancellation", async () => {
+    const { createDirectToolExecutor } = await import("../direct-tools.ts");
+    const controller = new AbortController();
+    const reason = new Error("request cancelled");
+    reason.name = "AbortError";
+    mocks.authenticate.mockRejectedValueOnce(reason);
+    const state = {
+      config: {
+        settings: { autoAuth: true },
+        mcpServers: { demo: { url: "https://api.example.com/mcp", auth: "oauth" } },
+      },
+      manager: {
+        getConnection: vi.fn(() => ({ status: "needs-auth" })),
+        touch: vi.fn(),
+        incrementInFlight: vi.fn(),
+        decrementInFlight: vi.fn(),
+      },
+      failureTracker: new Map(),
+      ui: { setStatus: vi.fn() },
+      completedUiSessions: [],
+    } as any;
+    mocks.lazyConnect.mockResolvedValue(false);
+
+    const executor = createDirectToolExecutor(() => state, () => null, {
+      serverName: "demo",
+      originalName: "search",
+      prefixedName: "demo_search",
+      description: "Search",
+    });
+
+    await expect(executor("id", {}, controller.signal, undefined, undefined as any)).rejects.toBe(reason);
+    expect(mocks.authenticate).toHaveBeenCalledWith(
+      "demo",
+      "https://api.example.com/mcp",
+      state.config.mcpServers.demo,
+      { signal: controller.signal },
+    );
   });
 
   it("fails fast in non-ui context for browser-based OAuth", async () => {

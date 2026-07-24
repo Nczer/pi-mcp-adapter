@@ -88,8 +88,10 @@ vi.mock("../proxy-modes.ts", () => ({
 }));
 
 vi.mock("../utils.ts", () => ({
+  formatTerminalError: (error: unknown) => error instanceof Error ? error.message : String(error),
   getConfigPathFromArgv: mocks.getConfigPathFromArgv,
   normalizeDirectToolInputSchema: mocks.normalizeDirectToolInputSchema,
+  sanitizeTerminalText: (text: string) => text,
   truncateAtWord: mocks.truncateAtWord,
 }));
 
@@ -706,7 +708,7 @@ describe("mcpAdapter session lifecycle", () => {
       await Promise.resolve();
       await new Promise((resolve) => setImmediate(resolve));
 
-      expect(consoleError).toHaveBeenCalledWith("MCP initialization failed:", expect.any(Error));
+      expect(consoleError).toHaveBeenCalledWith("MCP initialization failed: status boom");
     } finally {
       consoleError.mockRestore();
     }

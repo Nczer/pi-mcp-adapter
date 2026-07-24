@@ -15,6 +15,8 @@ import { logger } from "./logger.ts";
 import { startUiServer, type UiServerHandle } from "./ui-server.ts";
 import { isGlimpseAvailable, openGlimpseWindow } from "./glimpse-ui.ts";
 import type { SessionRecoveryDeps } from "./session-recovery.ts";
+import { combineAbortSignals, isAbortError } from "./runtime-owner.ts";
+import { throwIfAborted } from "./abort.ts";
 
 let activeGlimpseWindow: { close(): void } | null = null;
 
@@ -119,11 +121,15 @@ function withStreamEnvelope(
   };
 }
 
-async function openInBrowser(state: McpExtensionState, url: string): Promise<void> {
+async function openInBrowser(state: McpExtensionState, url: string, signal: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
   try {
     await state.openBrowser(url);
+    throwIfAborted(signal);
   } catch (error) {
+    if (isAbortError(error, signal)) throw error;
     const message = error instanceof Error ? error.message : String(error);
+    if (state.owner?.isActive() === false) return;
     state.ui?.notify(`MCP UI browser open failed: ${message}`, "warning");
     state.ui?.notify(`Open manually: ${url}`, "info");
   }
@@ -138,8 +144,10 @@ export async function maybeStartUiSession(
     server: request.serverName,
     tool: request.toolName,
   });
+  const runtimeSignal = combineAbortSignals(state.owner?.signal, request.signal) ?? new AbortController().signal;
 
   try {
+    throwIfAborted(runtimeSignal);
     if (
       state.uiServer &&
       state.uiServer.serverName === request.serverName &&
@@ -216,9 +224,10 @@ export async function maybeStartUiSession(
 
     const resource = await state.uiResourceHandler.readUiResource(request.serverName, request.uiResourceUri, {
       config: state.config,
-      signal: request.signal,
+      signal: runtimeSignal,
       onNeedsAuth: request.onNeedsAuth,
     });
+    throwIfAborted(runtimeSignal);
 
     if (state.uiServer) {
       state.uiServer.close("replaced");
@@ -355,6 +364,13 @@ export async function maybeStartUiSession(
       },
     });
 
+    if (state.owner?.isActive() === false || runtimeSignal.aborted) {
+      handle.close("runtime_owner_stopped");
+      handle = null;
+      throwIfAborted(runtimeSignal);
+      throw new Error("MCP UI session became stale before registration");
+    }
+
     if (streamToken) {
       state.manager.registerUiStreamListener(streamToken, (serverName, notification) => {
         if (!active || state.uiServer !== handle) return;
@@ -385,7 +401,7 @@ export async function maybeStartUiSession(
       if (useGlimpse) {
         try {
           const glimpseHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{margin:0;padding:0;width:100vw;height:100vh;overflow:hidden}iframe{width:100%;height:100%;border:none}</style></head><body><iframe src="${handle.url}"></iframe></body></html>`;
-          activeGlimpseWindow = await openGlimpseWindow(glimpseHtml, {
+          const glimpseWindow = await openGlimpseWindow(glimpseHtml, {
             title: `MCP · ${request.serverName} · ${request.toolName}`,
             width: 1000,
             height: 800,
@@ -393,19 +409,26 @@ export async function maybeStartUiSession(
               if (active) handle.close("glimpse-closed");
             },
           });
+          if (state.owner?.isActive() === false || runtimeSignal.aborted) {
+            glimpseWindow.close();
+            throwIfAborted(runtimeSignal);
+            throw new Error("MCP Glimpse window became stale before registration");
+          }
+          activeGlimpseWindow = glimpseWindow;
           viewer = "glimpse";
         } catch (error) {
           log.debug("Glimpse unavailable, using browser", {
             error: error instanceof Error ? error.message : String(error),
           });
-          await openInBrowser(state, handle.url);
+          await openInBrowser(state, handle.url, runtimeSignal!);
           viewer = "browser";
         }
       } else {
-        await openInBrowser(state, handle.url);
+        await openInBrowser(state, handle.url, runtimeSignal!);
       }
     }
 
+    throwIfAborted(runtimeSignal);
     handle.viewer = viewer;
     handle.windowOpen = windowOpen;
 
@@ -442,7 +465,7 @@ export async function maybeStartUiSession(
       },
     };
   } catch (error) {
-    if (error instanceof UrlElicitationRequiredError) throw error;
+    if (error instanceof UrlElicitationRequiredError || isAbortError(error, runtimeSignal)) throw error;
     const message = error instanceof Error ? error.message : String(error);
     log.error("Failed to start UI session", error instanceof Error ? error : undefined);
     state.ui?.notify(

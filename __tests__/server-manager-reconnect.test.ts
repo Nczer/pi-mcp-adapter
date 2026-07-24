@@ -132,8 +132,9 @@ describe("McpServerManager.reconnect", () => {
 
     const second = manager.reconnect("remote", def, stale);
     releaseClose();
-    const fresh = await second;
+    await expect(second).rejects.toBe(reason);
 
+    const fresh = await manager.reconnect("remote", def, stale);
     expect(fresh).not.toBe(stale);
     expect(manager.getConnection("remote")).toBe(fresh);
   });

@@ -15,6 +15,7 @@ import { resourceNameToToolName } from "./resource-tools.ts";
 import { authenticate, supportsOAuth } from "./mcp-auth-flow.ts";
 import { formatAuthRequiredMessage, resolveServerUrl, truncateAtWord } from "./utils.ts";
 import { SessionRecoveryAuthRequiredError, withSessionRecovery } from "./session-recovery.ts";
+import { combineAbortSignals, isAbortError } from "./runtime-owner.ts";
 
 const BUILTIN_NAMES = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "mcp"]);
 const INSTRUCTIONS_SNIPPET_LENGTH = 150;
@@ -43,6 +44,7 @@ function getDirectAuthFailedMessage(state: McpExtensionState, serverName: string
 async function attemptDirectAutoAuth(
   state: McpExtensionState,
   serverName: string,
+  signal?: AbortSignal,
 ): Promise<DirectAutoAuthResult> {
   if (state.config.settings?.autoAuth !== true) {
     return { status: "skipped" };
@@ -78,12 +80,18 @@ async function attemptDirectAutoAuth(
 
   try {
     if (state.authStorageOptions) {
-      await authenticate(serverName, serverUrl, definition, { authStorageOptions: state.authStorageOptions });
+      await authenticate(
+        serverName,
+        serverUrl,
+        definition,
+        signal ? { authStorageOptions: state.authStorageOptions, signal } : { authStorageOptions: state.authStorageOptions },
+      );
     } else {
-      await authenticate(serverName, serverUrl, definition);
+      await authenticate(serverName, serverUrl, definition, signal ? { signal } : {});
     }
     return { status: "success" };
   } catch (error) {
+    if (isAbortError(error, signal)) throw error;
     const message = error instanceof Error ? error.message : String(error);
     return {
       status: "failed",
@@ -330,12 +338,14 @@ export function createDirectToolExecutor(
       };
     }
 
-    let connected = await lazyConnect(state, spec.serverName, signal);
+    const ownedSignal = combineAbortSignals(state.owner?.signal, signal);
+    throwIfAborted(ownedSignal);
+    let connected = await lazyConnect(state, spec.serverName, ownedSignal);
     let autoAuthAttempted = false;
 
     if (!connected && state.manager.getConnection(spec.serverName)?.status === "needs-auth") {
       autoAuthAttempted = true;
-      const autoAuth = await attemptDirectAutoAuth(state, spec.serverName);
+      const autoAuth = await attemptDirectAutoAuth(state, spec.serverName, ownedSignal);
       if (autoAuth.status === "failed") {
         return {
           content: [{ type: "text" as const, text: autoAuth.message }],
@@ -345,7 +355,7 @@ export function createDirectToolExecutor(
       if (autoAuth.status === "success") {
         await state.manager.close(spec.serverName);
         clearFailure(state, spec.serverName);
-        connected = await lazyConnect(state, spec.serverName, signal);
+        connected = await lazyConnect(state, spec.serverName, ownedSignal);
       }
     }
 
@@ -374,7 +384,7 @@ export function createDirectToolExecutor(
     }
 
     let uiSession: UiSessionRuntime | null = null;
-    const requestOptions = state.manager.getRequestOptions?.(spec.serverName, signal) ?? (signal ? { signal } : undefined);
+    const requestOptions = state.manager.getRequestOptions?.(spec.serverName, ownedSignal) ?? (ownedSignal ? { signal: ownedSignal } : undefined);
 
     const outputGuardOptions = resolveMcpOutputGuardOptions(state.config.settings);
     const recoverAuthConnection = async () => {
@@ -383,7 +393,7 @@ export function createDirectToolExecutor(
 
       if (!autoAuthAttempted) {
         autoAuthAttempted = true;
-        const autoAuth = await attemptDirectAutoAuth(state, spec.serverName);
+        const autoAuth = await attemptDirectAutoAuth(state, spec.serverName, ownedSignal);
         if (autoAuth.status === "failed") {
           throw new SessionRecoveryAuthRequiredError(spec.serverName, autoAuth.message);
         }
@@ -394,7 +404,7 @@ export function createDirectToolExecutor(
             await state.manager.close(spec.serverName);
           }
           clearFailure(state, spec.serverName);
-          const reconnected = await lazyConnect(state, spec.serverName, signal);
+          const reconnected = await lazyConnect(state, spec.serverName, ownedSignal);
           return reconnected ? state.manager.getConnection(spec.serverName) : undefined;
         }
       }
@@ -407,7 +417,7 @@ export function createDirectToolExecutor(
 
       if (spec.resourceUri) {
         const result = await withSessionRecovery(
-          { manager: state.manager, config: state.config, signal, onNeedsAuth: recoverAuthConnection },
+          { manager: state.manager, config: state.config, signal: ownedSignal, onNeedsAuth: recoverAuthConnection },
           spec.serverName,
           (conn) => conn.client.readResource({ uri: spec.resourceUri! }, requestOptions),
         );
@@ -436,13 +446,13 @@ export function createDirectToolExecutor(
         : null;
 
       const result = await withSessionRecovery(
-        { manager: state.manager, config: state.config, signal, onNeedsAuth: recoverAuthConnection },
+        { manager: state.manager, config: state.config, signal: ownedSignal, onNeedsAuth: recoverAuthConnection },
         spec.serverName,
         (conn) => abortable(conn.client.callTool({
           name: spec.originalName,
           arguments: params ?? {},
           _meta: uiSession?.requestMeta,
-        }, undefined, requestOptions), signal),
+        }, undefined, requestOptions), ownedSignal),
       );
       uiSession?.sendToolResult(result as unknown as import("@modelcontextprotocol/sdk/types.js").CallToolResult);
 
@@ -507,7 +517,7 @@ export function createDirectToolExecutor(
       const guarded = await guardMcpOutput([{ type: "text" as const, text: message }], { ...outputGuardOptions, prefix: "Failed to call tool: ", suffix: schemaText });
       return {
         content: guarded.content,
-        details: { error: "call_failed", server: spec.serverName, ...guardedMcpDetails(guarded) },
+        details: { error: isAbortError(error, ownedSignal) ? "aborted" : "call_failed", server: spec.serverName, ...guardedMcpDetails(guarded) },
       };
     } finally {
       if (uiSession?.reused) {
