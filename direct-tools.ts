@@ -84,10 +84,12 @@ async function attemptDirectAutoAuth(
         serverName,
         serverUrl,
         definition,
-        signal ? { authStorageOptions: state.authStorageOptions, signal } : { authStorageOptions: state.authStorageOptions },
+        signal
+          ? { authStorageOptions: state.authStorageOptions, signal, runtime: state.oauthRuntime }
+          : { authStorageOptions: state.authStorageOptions, runtime: state.oauthRuntime },
       );
     } else {
-      await authenticate(serverName, serverUrl, definition, signal ? { signal } : {});
+      await authenticate(serverName, serverUrl, definition, { signal, runtime: state.oauthRuntime });
     }
     return { status: "success" };
   } catch (error) {

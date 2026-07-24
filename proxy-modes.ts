@@ -122,13 +122,15 @@ async function attemptAutoAuth(
         serverName,
         serverUrl,
         definition,
-        signal ? { authStorageOptions: state.authStorageOptions, signal } : { authStorageOptions: state.authStorageOptions },
+        signal
+          ? { authStorageOptions: state.authStorageOptions, signal, runtime: state.oauthRuntime }
+          : { authStorageOptions: state.authStorageOptions, runtime: state.oauthRuntime },
       );
     } else {
       if (signal) {
-        await authenticate(serverName, serverUrl, definition, { signal });
+        await authenticate(serverName, serverUrl, definition, { signal, runtime: state.oauthRuntime });
       } else {
-        await authenticate(serverName, serverUrl, definition);
+        await authenticate(serverName, serverUrl, definition, { runtime: state.oauthRuntime });
       }
     }
     return { status: "success" };
@@ -298,11 +300,11 @@ export async function executeAuthStart(state: McpExtensionState, serverName: str
 
     const { authorizationUrl } = state.authStorageOptions
       ? ownedSignal
-        ? await startAuth(serverName, serverUrl, definition, { authStorageOptions: state.authStorageOptions, signal: ownedSignal })
-        : await startAuth(serverName, serverUrl, definition, { authStorageOptions: state.authStorageOptions })
+        ? await startAuth(serverName, serverUrl, definition, { authStorageOptions: state.authStorageOptions, signal: ownedSignal, runtime: state.oauthRuntime })
+        : await startAuth(serverName, serverUrl, definition, { authStorageOptions: state.authStorageOptions, runtime: state.oauthRuntime })
       : ownedSignal
-        ? await startAuth(serverName, serverUrl, definition, { signal: ownedSignal })
-        : await startAuth(serverName, serverUrl, definition);
+        ? await startAuth(serverName, serverUrl, definition, { signal: ownedSignal, runtime: state.oauthRuntime })
+        : await startAuth(serverName, serverUrl, definition, { runtime: state.oauthRuntime });
     if (!authorizationUrl) {
       return {
         content: [{ type: "text" as const, text: `OAuth authentication successful for "${serverName}".` }],
@@ -336,11 +338,11 @@ export async function executeAuthComplete(state: McpExtensionState, serverName: 
   try {
     const status = state.authStorageOptions
       ? ownedSignal
-        ? await completeAuthFromInput(serverName, input, { authStorageOptions: state.authStorageOptions, signal: ownedSignal })
-        : await completeAuthFromInput(serverName, input, { authStorageOptions: state.authStorageOptions })
+        ? await completeAuthFromInput(serverName, input, { authStorageOptions: state.authStorageOptions, signal: ownedSignal, runtime: state.oauthRuntime })
+        : await completeAuthFromInput(serverName, input, { authStorageOptions: state.authStorageOptions, runtime: state.oauthRuntime })
       : ownedSignal
-        ? await completeAuthFromInput(serverName, input, { signal: ownedSignal })
-        : await completeAuthFromInput(serverName, input);
+        ? await completeAuthFromInput(serverName, input, { signal: ownedSignal, runtime: state.oauthRuntime })
+        : await completeAuthFromInput(serverName, input, { runtime: state.oauthRuntime });
     if (status !== "authenticated") {
       return {
         content: [{ type: "text" as const, text: `OAuth authentication did not complete for "${serverName}".` }],

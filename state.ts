@@ -7,6 +7,7 @@ import type { ToolMetadata, McpConfig, UiSessionMessages, UiStreamSummary } from
 import type { UiResourceHandler } from "./ui-resource-handler.ts";
 import type { UiServerHandle } from "./ui-server.ts";
 import type { McpRuntimeOwner } from "./runtime-owner.ts";
+import type { McpOAuthRuntime } from "./mcp-auth-flow.ts";
 
 export interface CompletedUiSession {
   serverName: string;
@@ -34,6 +35,8 @@ export interface McpExtensionState {
   toolMetadata: Map<string, ToolMetadata[]>;
   serverInstructions: Map<string, string>;
   config: McpConfig;
+  programmaticConfig?: boolean;
+  oauthRuntime: McpOAuthRuntime;
   authStorageOptions: AuthStorageOptions;
   failureTracker: Map<string, number>;
   failureMessages: Map<string, string>;

@@ -17,8 +17,6 @@ import {
   getAuthForUrl,
   updateTokens,
   updateClientInfo,
-  updateCodeVerifier,
-  updateOAuthState,
   clearAllCredentials,
   clearClientInfo,
   clearTokens,
@@ -86,6 +84,9 @@ export interface McpOAuthCallbacks {
 export class McpOAuthProvider implements OAuthClientProvider {
   private readonly redirectUrlSnapshot: string | undefined
   private active = true
+  private flowClientInfo: StoredClientInfo | undefined
+  private flowCodeVerifier: string | undefined
+  private flowState: string | undefined
 
   constructor(
     private serverName: string,
@@ -93,7 +94,10 @@ export class McpOAuthProvider implements OAuthClientProvider {
     private config: McpOAuthConfig,
     private callbacks: McpOAuthCallbacks,
     private storageOptions: AuthStorageOptions = {},
+    private runtimeSignal?: AbortSignal,
+    initialState?: string,
   ) {
+    this.flowState = initialState
     this.redirectUrlSnapshot = config.grantType === "client_credentials"
       ? undefined
       : config.redirectUri ?? `http://localhost:${getOAuthCallbackPort()}${getOAuthCallbackPath()}`
@@ -109,6 +113,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
 
   private throwIfInactive(): void {
     if (!this.active) throw new Error("OAuth flow is no longer active")
+    this.runtimeSignal?.throwIfAborted()
   }
 
   /**
@@ -163,17 +168,17 @@ export class McpOAuthProvider implements OAuthClientProvider {
       }
     }
 
-    // Check stored client info (from dynamic registration)
-    // Use getAuthForUrl to validate credentials are for the current server URL
-    const entry = await getAuthForUrl(this.serverName, this.serverUrl, this.storageOptions)
-    if (entry?.clientInfo) {
+    // Keep client registration associated with this in-flight flow even if
+    // another runtime writes the shared persistent entry for the same name.
+    const clientInfo = this.flowClientInfo ?? (await getAuthForUrl(this.serverName, this.serverUrl, this.storageOptions))?.clientInfo
+    if (clientInfo) {
       // Check if client secret has expired
-      if (entry.clientInfo.clientSecretExpiresAt && entry.clientInfo.clientSecretExpiresAt < Date.now() / 1000) {
+      if (clientInfo.clientSecretExpiresAt && clientInfo.clientSecretExpiresAt < Date.now() / 1000) {
         return undefined
       }
       return {
-        client_id: entry.clientInfo.clientId,
-        client_secret: entry.clientInfo.clientSecret,
+        client_id: clientInfo.clientId,
+        client_secret: clientInfo.clientSecret,
       }
     }
 
@@ -194,6 +199,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
       redirectUris,
     }
     this.throwIfInactive()
+    this.flowClientInfo = clientInfo
     updateClientInfo(this.serverName, clientInfo, this.serverUrl, this.storageOptions)
   }
 
@@ -244,10 +250,9 @@ export class McpOAuthProvider implements OAuthClientProvider {
     if (this.usesClientCredentials) {
       throw new Error("redirectToAuthorization is not used for client_credentials flow")
     }
-    // No saved oauthState means we're on the post-refresh authorize fallback.
-    const entry = await getAuthForUrl(this.serverName, this.serverUrl, this.storageOptions)
+    // No flow-local state means we're on the post-refresh authorize fallback.
     this.throwIfInactive()
-    if (!entry?.oauthState) {
+    if (!this.flowState) {
       throw new UnauthorizedError(
         `Re-authentication required for MCP server: ${this.serverName}`,
       )
@@ -261,7 +266,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
    */
   async saveCodeVerifier(codeVerifier: string): Promise<void> {
     this.throwIfInactive()
-    updateCodeVerifier(this.serverName, codeVerifier, this.serverUrl, this.storageOptions)
+    this.flowCodeVerifier = codeVerifier
   }
 
   /**
@@ -272,11 +277,11 @@ export class McpOAuthProvider implements OAuthClientProvider {
     if (this.usesClientCredentials) {
       throw new Error("codeVerifier is not used for client_credentials flow")
     }
-    const entry = await getAuthForUrl(this.serverName, this.serverUrl, this.storageOptions)
-    if (!entry?.codeVerifier) {
+    this.throwIfInactive()
+    if (!this.flowCodeVerifier) {
       throw new Error(`No code verifier saved for MCP server: ${this.serverName}`)
     }
-    return entry.codeVerifier
+    return this.flowCodeVerifier
   }
 
   /**
@@ -284,7 +289,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
    */
   async saveState(state: string): Promise<void> {
     this.throwIfInactive()
-    updateOAuthState(this.serverName, state, this.serverUrl, this.storageOptions)
+    this.flowState = state
   }
 
   /**
@@ -295,13 +300,13 @@ export class McpOAuthProvider implements OAuthClientProvider {
     if (this.usesClientCredentials) {
       throw new Error("state is not used for client_credentials flow")
     }
-    const entry = await getAuthForUrl(this.serverName, this.serverUrl, this.storageOptions)
-    if (!entry?.oauthState) {
+    this.throwIfInactive()
+    if (!this.flowState) {
       throw new UnauthorizedError(
         `Re-authentication required for MCP server: ${this.serverName}`,
       )
     }
-    return entry.oauthState
+    return this.flowState
   }
 
   /**
@@ -312,9 +317,13 @@ export class McpOAuthProvider implements OAuthClientProvider {
     this.throwIfInactive()
     switch (type) {
       case "all":
+        this.flowClientInfo = undefined
+        this.flowCodeVerifier = undefined
+        this.flowState = undefined
         clearAllCredentials(this.serverName, this.storageOptions)
         break
       case "client":
+        this.flowClientInfo = undefined
         clearClientInfo(this.serverName, this.storageOptions)
         break
       case "tokens":

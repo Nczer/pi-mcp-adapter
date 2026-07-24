@@ -5,8 +5,10 @@ const mocks = vi.hoisted(() => ({
   updateStatusBar: vi.fn(),
   flushMetadataCache: vi.fn(),
   initializeOAuth: vi.fn().mockResolvedValue(undefined),
+  createOAuthRuntime: vi.fn((signal: AbortSignal) => ({ signal })),
   shutdownOAuth: vi.fn().mockResolvedValue(undefined),
   loadMcpConfig: vi.fn(() => ({ mcpServers: {} })),
+  cloneMcpConfig: vi.fn((config: unknown) => structuredClone(config)),
   loadMetadataCache: vi.fn(() => null),
   buildProxyDescription: vi.fn(() => "MCP gateway"),
   createDirectToolExecutor: vi.fn(() => vi.fn()),
@@ -45,11 +47,13 @@ vi.mock("../init.ts", () => ({
 
 vi.mock("../mcp-auth-flow.ts", () => ({
   initializeOAuth: mocks.initializeOAuth,
+  createOAuthRuntime: mocks.createOAuthRuntime,
   shutdownOAuth: mocks.shutdownOAuth,
 }));
 
 vi.mock("../config.ts", () => ({
   loadMcpConfig: mocks.loadMcpConfig,
+  cloneMcpConfig: mocks.cloneMcpConfig,
 }));
 
 vi.mock("../metadata-cache.ts", () => ({
@@ -109,6 +113,7 @@ function createState() {
     lifecycle: { gracefulShutdown: vi.fn().mockResolvedValue(undefined) },
     toolMetadata: new Map(),
     config: { mcpServers: {} },
+    oauthRuntime: { signal: new AbortController().signal },
     failureTracker: new Map(),
     uiResourceHandler: {},
     consentManager: {},
@@ -148,8 +153,10 @@ describe("mcpAdapter session lifecycle", () => {
     }
 
     mocks.initializeOAuth.mockResolvedValue(undefined);
+    mocks.createOAuthRuntime.mockImplementation((signal: AbortSignal) => ({ signal }));
     mocks.shutdownOAuth.mockResolvedValue(undefined);
     mocks.loadMcpConfig.mockReturnValue({ mcpServers: {} });
+    mocks.cloneMcpConfig.mockImplementation((config: unknown) => structuredClone(config));
     mocks.loadMetadataCache.mockReturnValue(null);
     mocks.buildProxyDescription.mockReturnValue("MCP gateway");
     mocks.createDirectToolExecutor.mockReturnValue(vi.fn());
@@ -413,6 +420,116 @@ describe("mcpAdapter session lifecycle", () => {
     );
   });
 
+  it("exports createMcpAdapter while retaining the default adapter export", async () => {
+    const adapterModule = await import("../index.ts");
+    expect(adapterModule.createMcpAdapter).toBeTypeOf("function");
+    expect(adapterModule.default).toBeTypeOf("function");
+
+    const { api } = createPi();
+    adapterModule.default(api);
+    expect(mocks.loadMcpConfig).toHaveBeenCalledWith(undefined);
+  });
+
+  it("uses only the supplied config for early registration and session initialization", async () => {
+    const config = {
+      mcpServers: {
+        memory: { url: "https://memory.example.com/mcp", directTools: true },
+      },
+      settings: { disableProxyTool: true as const },
+    };
+    mocks.getConfigPathFromArgv.mockReturnValue("/ambient/argv.json");
+    mocks.resolveDirectTools.mockReturnValue([{
+      serverName: "memory",
+      originalName: "search",
+      prefixedName: "memory_search",
+      description: "Search",
+    }]);
+    const state = createState();
+    state.config = structuredClone(config);
+    mocks.initializeMcp.mockResolvedValue(state);
+
+    const { createMcpAdapter } = await import("../index.ts");
+    const { api, handlers } = createPi();
+    createMcpAdapter({ config })(api);
+
+    expect(mocks.loadMcpConfig).not.toHaveBeenCalled();
+    expect(mocks.getConfigPathFromArgv).not.toHaveBeenCalled();
+    expect(mocks.resolveDirectTools).toHaveBeenCalledWith(
+      expect.objectContaining({ mcpServers: { memory: config.mcpServers.memory } }),
+      null,
+      "server",
+      undefined,
+    );
+    expect(api.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "memory_search" }));
+    expect(api.registerTool).not.toHaveBeenCalledWith(expect.objectContaining({ name: "mcp" }));
+
+    await handlers.get("session_start")?.({}, { hasUI: false });
+    expect(mocks.initializeMcp).toHaveBeenCalledWith(
+      api,
+      expect.any(Object),
+      expect.any(Object),
+      expect.objectContaining({ config: expect.objectContaining({ mcpServers: config.mcpServers }) }),
+    );
+    expect(mocks.initializeMcp.mock.calls[0][3].config).not.toBe(config);
+  });
+
+  it("snapshots caller config and isolates separate factories", async () => {
+    const firstConfig = { mcpServers: { first: { url: "https://first.example.com/mcp" } } };
+    const secondConfig = { mcpServers: { second: { url: "https://second.example.com/mcp" } } };
+    const firstAdapter = (await import("../index.ts")).createMcpAdapter({ config: firstConfig });
+    const secondAdapter = (await import("../index.ts")).createMcpAdapter({ config: secondConfig });
+    firstConfig.mcpServers.first.url = "https://mutated.example.com/mcp";
+
+    const firstPi = createPi();
+    const secondPi = createPi();
+    firstAdapter(firstPi.api);
+    secondAdapter(secondPi.api);
+
+    expect(mocks.resolveDirectTools.mock.calls.at(-2)?.[0]).toEqual({
+      mcpServers: { first: { url: "https://first.example.com/mcp" } },
+    });
+    expect(mocks.resolveDirectTools.mock.calls.at(-1)?.[0]).toEqual(secondConfig);
+  });
+
+  it("gives configPath precedence without changing the default argv path", async () => {
+    mocks.getConfigPathFromArgv.mockReturnValue("/argv.json");
+    const { createMcpAdapter, default: defaultAdapter } = await import("../index.ts");
+    const configured = createMcpAdapter({ configPath: "/factory.json" });
+    configured(createPi().api);
+    expect(mocks.loadMcpConfig).toHaveBeenCalledWith("/factory.json");
+    expect(mocks.getConfigPathFromArgv).not.toHaveBeenCalled();
+
+    mocks.loadMcpConfig.mockClear();
+    mocks.getConfigPathFromArgv.mockClear();
+    defaultAdapter(createPi().api);
+    expect(mocks.getConfigPathFromArgv).toHaveBeenCalledTimes(1);
+    expect(mocks.loadMcpConfig).toHaveBeenCalledWith("/argv.json");
+  });
+
+  it("uses status notifications instead of ambient panels in memory-config mode", async () => {
+    const state = createState();
+    mocks.initializeMcp.mockResolvedValue(state);
+    const { createMcpAdapter } = await import("../index.ts");
+    const { api, handlers } = createPi();
+    createMcpAdapter({ config: { mcpServers: { memory: { url: "https://memory.example.com/mcp" } } } })(api);
+    const ui = { notify: vi.fn() };
+    await handlers.get("session_start")?.({}, { hasUI: true, ui });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const commandDef = api.registerCommand.mock.calls.find((call: any[]) => call[0] === "mcp")?.[1];
+    await commandDef.handler("setup", { hasUI: true, ui });
+    await commandDef.handler("status", { hasUI: true, ui });
+    const authDef = api.registerCommand.mock.calls.find((call: any[]) => call[0] === "mcp-auth")?.[1];
+    await authDef.handler("", { hasUI: true, ui });
+
+    expect(mocks.openMcpSetup).not.toHaveBeenCalled();
+    expect(mocks.openMcpPanel).not.toHaveBeenCalled();
+    expect(mocks.openMcpAuthPanel).not.toHaveBeenCalled();
+    expect(mocks.showStatus).toHaveBeenCalled();
+    expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("in-memory"), "info");
+  });
+
   it("starts a replacement init immediately and shuts down stale init results", async () => {
     const first = createDeferred<any>();
     const second = createDeferred<any>();
@@ -429,11 +546,13 @@ describe("mcpAdapter session lifecycle", () => {
 
     await sessionStart?.({}, {});
     expect(mocks.initializeMcp).toHaveBeenCalledTimes(1);
-    expect(mocks.shutdownOAuth).toHaveBeenCalledTimes(1);
+    expect(mocks.shutdownOAuth).not.toHaveBeenCalled();
+    const firstRuntime = mocks.createOAuthRuntime.mock.results[0].value;
 
     await sessionStart?.({}, {});
     expect(mocks.initializeMcp).toHaveBeenCalledTimes(2);
-    expect(mocks.shutdownOAuth).toHaveBeenCalledTimes(2);
+    expect(mocks.shutdownOAuth).toHaveBeenCalledTimes(1);
+    expect(mocks.shutdownOAuth).toHaveBeenCalledWith(firstRuntime);
 
     const activeState = createState();
     second.resolve(activeState);
@@ -643,7 +762,13 @@ describe("mcpAdapter session lifecycle", () => {
     const commandDef = api.registerCommand.mock.calls.find((call: any[]) => call[0] === "mcp-auth")?.[1];
     await commandDef.handler("github", { hasUI: true, ui });
 
-    expect(mocks.authenticateServer).toHaveBeenCalledWith("github", state.config, expect.any(Object));
+    expect(mocks.authenticateServer).toHaveBeenCalledWith(
+      "github",
+      state.config,
+      expect.any(Object),
+      expect.any(AbortSignal),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(mocks.reconnectServer).toHaveBeenCalledWith(state, expect.any(Object), "github");
     expect(mocks.openMcpAuthPanel).not.toHaveBeenCalled();
   });
@@ -666,7 +791,13 @@ describe("mcpAdapter session lifecycle", () => {
     const commandDef = api.registerCommand.mock.calls.find((call: any[]) => call[0] === "mcp-auth")?.[1];
     await commandDef.handler("github", { hasUI: true, ui });
 
-    expect(mocks.authenticateServer).toHaveBeenCalledWith("github", state.config, expect.any(Object));
+    expect(mocks.authenticateServer).toHaveBeenCalledWith(
+      "github",
+      state.config,
+      expect.any(Object),
+      expect.any(AbortSignal),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(mocks.reconnectServer).not.toHaveBeenCalled();
     expect(mocks.openMcpAuthPanel).not.toHaveBeenCalled();
   });

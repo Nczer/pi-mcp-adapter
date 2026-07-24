@@ -144,6 +144,7 @@ describe("proxy auto auth", () => {
         },
       },
       manager,
+      oauthRuntime: { signal: new AbortController().signal },
       toolMetadata: new Map(),
       serverInstructions: new Map(),
       failureTracker: new Map(),
@@ -156,6 +157,7 @@ describe("proxy auto auth", () => {
       "demo",
       "https://api.example.com/mcp",
       state.config.mcpServers.demo,
+      { runtime: state.oauthRuntime },
     );
     expect(manager.close).toHaveBeenCalledWith("demo");
     expect(manager.connect).toHaveBeenCalledTimes(2);

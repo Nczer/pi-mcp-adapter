@@ -10,6 +10,8 @@ const packageJson = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf
   files?: string[];
   peerDependencies?: Record<string, string>;
   peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+  exports?: Record<string, unknown>;
+  types?: string;
 };
 
 const hostPeerPackages = {
@@ -19,6 +21,22 @@ const hostPeerPackages = {
 };
 
 describe("package.json files", () => {
+  it("exports the TypeScript source entry for SDK consumers", () => {
+    expect(packageJson.types).toBe("./index.ts");
+    expect(packageJson.exports).toMatchObject({
+      ".": {
+        types: "./index.ts",
+        import: "./index.ts",
+        default: "./index.ts",
+      },
+      "./types": {
+        types: "./types.ts",
+        import: "./types.ts",
+        default: "./types.ts",
+      },
+    });
+  });
+
   it("publishes every root runtime TypeScript module", () => {
     const publishedFiles = new Set(packageJson.files ?? []);
     const runtimeModules = readdirSync(repoRoot)

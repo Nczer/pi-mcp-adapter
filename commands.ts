@@ -15,7 +15,7 @@ import {
 import { markKeepAliveAfterConnect, updateMetadataCache, updateStatusBar, getFailureAgeSeconds, getFailureMessage, clearFailure, recordFailure } from "./init.ts";
 import { loadMetadataCache } from "./metadata-cache.ts";
 import { buildToolMetadata } from "./tool-metadata.ts";
-import { supportsOAuth, authenticate, removeAuth } from "./mcp-auth-flow.ts";
+import { supportsOAuth, authenticate, removeAuth, type McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import { getAuthForUrl, getAuthStorageOptions } from "./mcp-auth.ts";
 import { loadOnboardingState, markSetupCompleted as persistSetupCompleted, markSharedConfigHintShown } from "./onboarding-state.ts";
 import { openPath, resolveServerUrl, sanitizeTerminalText } from "./utils.ts";
@@ -173,6 +173,7 @@ export async function authenticateServer(
   config: McpConfig,
   ctx: ExtensionContext,
   signal?: AbortSignal,
+  runtime?: McpOAuthRuntime,
 ): Promise<McpAuthResult> {
   const ui = ctx.hasUI ? ctx.ui : undefined;
   const cwd = ctx.cwd;
@@ -216,6 +217,7 @@ export async function authenticateServer(
         );
       },
       signal,
+      runtime,
     });
     if (signal?.aborted) signal.throwIfAborted();
 
@@ -251,7 +253,7 @@ export async function logoutServer(
     return { ok: false, message };
   }
 
-  await removeAuth(serverName, { authStorageOptions: state.authStorageOptions, signal: state.owner?.signal });
+  await removeAuth(serverName, { authStorageOptions: state.authStorageOptions, signal: state.owner?.signal, runtime: state.oauthRuntime });
   state.owner?.throwIfInactive();
   await state.manager.close(serverName);
   state.owner?.throwIfInactive();
@@ -285,13 +287,17 @@ function buildSharedConfigNoticeLines(configOverridePath: string | undefined, cw
 }
 
 export async function openMcpSetup(
-  _state: McpExtensionState,
+  state: McpExtensionState,
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   configOverridePath?: string,
   mode: "empty" | "setup" = "setup",
 ): Promise<PanelFlowResult> {
   if (!ctx.hasUI) return { configChanged: false };
+  if (state.programmaticConfig) {
+    ctx.ui.notify("MCP setup is unavailable when config is supplied by createMcpAdapter().", "info");
+    return { configChanged: false };
+  }
 
   const discovery = getMcpDiscoverySummary(configOverridePath, ctx.cwd);
   const onboardingState = loadOnboardingState();
@@ -357,7 +363,7 @@ function buildMcpPanelCallbacks(
       const definition = config.mcpServers[serverName];
       return definition ? supportsOAuth(definition) : false;
     },
-    authenticate: (serverName: string) => authenticateServer(serverName, config, ctx),
+    authenticate: (serverName: string) => authenticateServer(serverName, config, ctx, state.owner?.signal, state.oauthRuntime),
     getConnectionStatus: (serverName: string) => {
       const definition = config.mcpServers[serverName];
       const connection = state.manager.getConnection(serverName);
@@ -397,6 +403,13 @@ export async function openMcpPanel(
   ctx: ExtensionContext,
   configOverridePath?: string,
 ): Promise<PanelFlowResult> {
+  if (state.programmaticConfig) {
+    if (ctx.hasUI) {
+      ctx.ui.notify("MCP status is shown from the in-memory SDK config; configuration discovery is unavailable.", "info");
+      await showStatus(state, ctx);
+    }
+    return { configChanged: false };
+  }
   if (Object.keys(state.config.mcpServers).length === 0) {
     return openMcpSetup(state, pi, ctx, configOverridePath, "empty");
   }
@@ -443,6 +456,10 @@ export async function openMcpAuthPanel(
   configOverridePath?: string,
 ): Promise<PanelFlowResult> {
   if (!ctx.hasUI) return { configChanged: false };
+  if (state.programmaticConfig) {
+    ctx.ui.notify("Use /mcp-auth <server> to authenticate a server from the in-memory SDK config.", "info");
+    return { configChanged: false };
+  }
 
   const config = state.config;
   const oauthServers = Object.entries(config.mcpServers).filter(([, definition]) => supportsOAuth(definition));

@@ -1,22 +1,29 @@
 import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
 import type { McpExtensionState } from "./state.ts";
+import type { McpAdapterOptions } from "./types.ts";
+import type { McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import { Type } from "typebox";
 import { showStatus, showTools, reconnectServer, reconnectServers, authenticateServer, logoutServer, openMcpAuthPanel, openMcpPanel, openMcpSetup } from "./commands.ts";
-import { loadMcpConfig } from "./config.ts";
+import { cloneMcpConfig, loadMcpConfig } from "./config.ts";
 import { buildProxyDescription, createDirectToolExecutor, getMissingConfiguredDirectToolServers, resolveDirectTools } from "./direct-tools.ts";
 import { flushMetadataCache, initializeMcp, updateStatusBar } from "./init.ts";
 import { loadMetadataCache } from "./metadata-cache.ts";
 import { executeAuthComplete, executeAuthStart, executeCall, executeConnect, executeDescribe, executeInstructions, executeList, executeSearch, executeStatus, executeUiMessages } from "./proxy-modes.ts";
 import { formatTerminalError, getConfigPathFromArgv, normalizeDirectToolInputSchema, truncateAtWord } from "./utils.ts";
-import { initializeOAuth, shutdownOAuth } from "./mcp-auth-flow.ts";
+import { createOAuthRuntime, shutdownOAuth } from "./mcp-auth-flow.ts";
 import { createMcpDirectToolCallRenderer, renderMcpProxyToolCall, renderMcpToolResult } from "./tool-result-renderer.ts";
 import { toolErrorOverride } from "./error-signal.ts";
 import { createMcpRuntimeOwner, createOwnedUi, isAbortError, type McpRuntimeOwner } from "./runtime-owner.ts";
 
-export default function mcpAdapter(pi: ExtensionAPI) {
+export type { McpAdapterOptions } from "./types.ts";
+
+function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
+  const sessionConfig = options.config !== undefined ? cloneMcpConfig(options.config) : undefined;
+  const programmaticConfig = sessionConfig !== undefined;
   let state: McpExtensionState | null = null;
   let initPromise: Promise<McpExtensionState> | null = null;
   let currentOwner: McpRuntimeOwner | null = null;
+  let currentOAuthRuntime: McpOAuthRuntime | null = null;
   let lifecycleGeneration = 0;
 
   async function shutdownState(currentState: McpExtensionState | null, reason: string): Promise<void> {
@@ -53,8 +60,12 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     }
   }
 
-  const earlyConfigPath = getConfigPathFromArgv();
-  const earlyConfig = loadMcpConfig(earlyConfigPath);
+  const earlyConfigPath = programmaticConfig
+    ? undefined
+    : options.configPath ?? getConfigPathFromArgv();
+  const earlyConfig = programmaticConfig
+    ? cloneMcpConfig(sessionConfig)
+    : loadMcpConfig(earlyConfigPath);
   const earlyCache = loadMetadataCache();
   const prefix = earlyConfig.settings?.toolPrefix ?? "server";
 
@@ -106,8 +117,11 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     const generation = ++lifecycleGeneration;
     const previousState = state;
     const previousOwner = currentOwner;
+    const previousOAuthRuntime = currentOAuthRuntime;
     const owner = createMcpRuntimeOwner();
+    const oauthRuntime = createOAuthRuntime(owner.signal);
     currentOwner = owner;
+    currentOAuthRuntime = oauthRuntime;
     state = null;
     initPromise = null;
 
@@ -118,7 +132,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       await Promise.all([
         stopPrevious,
         shutdownState(previousState, "session_restart"),
-        shutdownOAuth(),
+        previousOAuthRuntime ? shutdownOAuth(previousOAuthRuntime) : Promise.resolve(),
       ]);
     } catch (error) {
       console.error(`MCP: failed to shut down previous session state: ${formatTerminalError(error)}`);
@@ -128,13 +142,15 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       return;
     }
 
-    await initializeOAuth(owner.signal).catch(err => {
-      console.error(`MCP OAuth initialization failed: ${formatTerminalError(err)}`);
-    });
-
     if (generation !== lifecycleGeneration || !owner.isActive()) return;
 
-    const promise = initializeMcp(pi, ctx, owner);
+    const initOptions = {
+      ...(programmaticConfig || options.configPath !== undefined
+        ? { configPath: earlyConfigPath, config: sessionConfig }
+        : {}),
+      oauthRuntime,
+    };
+    const promise = initializeMcp(pi, ctx, owner, initOptions);
     initPromise = promise;
 
     promise.then(async (nextState) => {
@@ -166,7 +182,9 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     ++lifecycleGeneration;
     const currentState = state;
     const owner = currentOwner;
+    const oauthRuntime = currentOAuthRuntime;
     currentOwner = null;
+    currentOAuthRuntime = null;
     state = null;
     initPromise = null;
 
@@ -177,7 +195,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       await Promise.all([
         stopOwner,
         shutdownState(currentState, "session_shutdown"),
-        shutdownOAuth(),
+        oauthRuntime ? shutdownOAuth(oauthRuntime) : Promise.resolve(),
       ]);
     } catch (error) {
       console.error(`MCP: session shutdown cleanup failed: ${formatTerminalError(error)}`);
@@ -255,6 +273,10 @@ export default function mcpAdapter(pi: ExtensionAPI) {
           break;
         case "setup": {
           commandOwner?.throwIfInactive();
+          if (programmaticConfig) {
+            commandCtx.ui?.notify("MCP setup is unavailable when config is supplied by createMcpAdapter().", "info");
+            break;
+          }
           const result = await openMcpSetup(state, pi, commandCtx, earlyConfigPath, "setup");
           if (result?.configChanged) {
             commandOwner?.throwIfInactive();
@@ -278,6 +300,11 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         default:
           if (commandCtx.hasUI) {
             commandOwner?.throwIfInactive();
+            if (programmaticConfig) {
+              commandCtx.ui?.notify("MCP status is shown from the in-memory SDK config; configuration discovery is unavailable.", "info");
+              await showStatus(state, commandCtx);
+              break;
+            }
             const result = await openMcpPanel(state, pi, commandCtx, earlyConfigPath);
             if (result?.configChanged) {
               commandOwner?.throwIfInactive();
@@ -328,11 +355,15 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       }
 
       if (!serverName) {
+        if (programmaticConfig) {
+          commandCtx.ui?.notify("Use /mcp-auth <server> to authenticate a server from the in-memory SDK config.", "info");
+          return;
+        }
         await openMcpAuthPanel(state, pi, commandCtx, earlyConfigPath);
         return;
       }
 
-      const result = await authenticateServer(serverName, state.config, commandCtx);
+      const result = await authenticateServer(serverName, state.config, commandCtx, commandCtx.signal, state.oauthRuntime);
       if (result.ok) {
         commandOwner?.throwIfInactive();
         await reconnectServer(state, commandCtx, serverName);
@@ -479,3 +510,15 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     });
   }
 }
+
+export function createMcpAdapter(options: McpAdapterOptions = {}) {
+  const factoryConfig = options.config !== undefined ? cloneMcpConfig(options.config) : undefined;
+  return function mcpAdapter(pi: ExtensionAPI) {
+    installMcpAdapter(pi, {
+      configPath: options.configPath,
+      config: factoryConfig !== undefined ? cloneMcpConfig(factoryConfig) : undefined,
+    });
+  };
+}
+
+export default createMcpAdapter();

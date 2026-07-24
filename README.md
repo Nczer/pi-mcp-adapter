@@ -101,6 +101,33 @@ Use the shared MCP files when you want one setup to work across hosts, and Pi-ow
 
 Pi-specific files are the write targets for imported or shared global servers when Pi needs to persist adapter-only settings such as `directTools`.
 
+### SDK configuration
+
+Use `createMcpAdapter` when an SDK or server integration already owns its MCP configuration:
+
+```ts
+import { createMcpAdapter } from "pi-mcp-adapter";
+
+const extension = createMcpAdapter({
+  config: {
+    mcpServers: {
+      docs: {
+        url: "https://mcp.example.com/mcp",
+        lifecycle: "eager",
+      },
+    },
+  },
+});
+
+// Register `extension` with the host SDK.
+```
+
+The package ships TypeScript source for Pi's source-loader and SDK integrations. Use a TypeScript-capable loader/toolchain (for example `node --import tsx`) when importing the package from a standalone Node process; raw Node ESM does not execute the `.ts` entry directly.
+
+A supplied `config` is a complete, isolated snapshot. It is not merged with files, imports, global config, project config, or `--mcp-config`, and it is never mutated. Each adapter factory and session receives its own clone, so separate integrations can use different servers and settings safely. In this mode, server status, reconnect, explicit `/mcp-auth <server>`, proxy calls, and direct tools continue to work; setup and no-argument auth/status panels report the limitation instead of discovering or writing ambient config.
+
+With `configPath` and no `config`, the adapter keeps normal file merge behavior, and that path takes precedence over argv and `--mcp-config`. The default export keeps the normal file-based behavior. OAuth credentials remain persistent and are shared by the configured server name by default; callers requiring strict same-name credential-file isolation should set distinct `settings.oauthDir` values. URL binding prevents credentials from being accepted for a different server URL. CSRF state and PKCE verifiers are flow-local, so concurrent authorization flows do not share transient secrets.
+
 In the configuration examples below, `30000` is illustrative only. If `requestTimeoutMs` is omitted or set to `<= 0`, the MCP SDK default timeout is used.
 
 ### Server Options

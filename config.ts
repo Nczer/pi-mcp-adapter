@@ -189,6 +189,10 @@ export function getMcpDiscoverySummary(overridePath?: string, cwd = process.cwd(
   };
 }
 
+export function cloneMcpConfig(config: McpConfig): McpConfig {
+  return structuredClone(config);
+}
+
 export function loadMcpConfig(overridePath?: string, cwd = process.cwd()): McpConfig {
   let config: McpConfig = { mcpServers: {} };
 

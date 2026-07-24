@@ -298,26 +298,29 @@ describe("mcp-auth-flow explicit auth", () => {
       await provider.saveTokens({ access_token: "token-b", token_type: "Bearer" });
       return "AUTHORIZED";
     });
-    const { startAuth, completeAuthFromInput, shutdownOAuth } = await import("../mcp-auth-flow.ts");
+    const { createOAuthRuntime, startAuth, completeAuthFromInput, shutdownOAuth } = await import("../mcp-auth-flow.ts");
+    const runtimeA = createOAuthRuntime();
+    const runtimeB = createOAuthRuntime();
     const { getAuthForUrl, getOAuthState } = await import("../mcp-auth.ts");
 
     await startAuth("shared", "https://api.example.com/mcp", {
       url: "https://api.example.com/mcp",
       auth: "oauth",
-    }, { authStorageOptions: authStorageOptionsA });
+    }, { authStorageOptions: authStorageOptionsA, runtime: runtimeA });
     await startAuth("shared", "https://api.example.com/mcp", {
       url: "https://api.example.com/mcp",
       auth: "oauth",
-    }, { authStorageOptions: authStorageOptionsB });
+    }, { authStorageOptions: authStorageOptionsB, runtime: runtimeB });
 
-    expect(getOAuthState("shared", authStorageOptionsA)).toBeDefined();
-    expect(getOAuthState("shared", authStorageOptionsB)).toBeDefined();
+    expect(getOAuthState("shared", authStorageOptionsA)).toBeUndefined();
+    expect(getOAuthState("shared", authStorageOptionsB)).toBeUndefined();
 
-    await completeAuthFromInput("shared", "code-b", { authStorageOptions: authStorageOptionsB });
+    await completeAuthFromInput("shared", "code-b", { authStorageOptions: authStorageOptionsB, runtime: runtimeB });
 
     expect(getAuthForUrl("shared", "https://api.example.com/mcp", authStorageOptionsA)?.tokens).toBeUndefined();
     expect(getAuthForUrl("shared", "https://api.example.com/mcp", authStorageOptionsB)?.tokens?.accessToken).toBe("token-b");
-    await shutdownOAuth();
+    await shutdownOAuth(runtimeA);
+    await shutdownOAuth(runtimeB);
     rmSync(projectA, { recursive: true, force: true });
     rmSync(projectB, { recursive: true, force: true });
   });
@@ -545,7 +548,7 @@ describe("mcp-auth-flow explicit auth", () => {
       serverUrl: "https://api.example.com/mcp",
       authorizationCode: "manual-code",
     });
-    expect(mocks.cancelPendingCallback).not.toHaveBeenCalled();
+    expect(mocks.cancelPendingCallback).toHaveBeenCalledWith(mocks.waitForCallback.mock.calls[0][0]);
     expect(getOAuthState("browser-fail")).toBeUndefined();
   });
 
@@ -659,12 +662,94 @@ describe("mcp-auth-flow explicit auth", () => {
     expect(mocks.sdkAuth).toHaveBeenCalledTimes(1);
   });
 
+  it("isolates concurrent OAuth runtimes with the same server name and auth directory", async () => {
+    const states: string[] = [];
+    const verifiers: string[] = [];
+    mocks.sdkAuth.mockImplementation(async (provider, options) => {
+      if (options.authorizationCode) {
+        verifiers.push(await provider.codeVerifier());
+        return "AUTHORIZED";
+      }
+      const state = await provider.state();
+      states.push(state);
+      await provider.saveCodeVerifier(`verifier-${states.length}`);
+      await provider.redirectToAuthorization(new URL(`https://auth.example.com/authorize?state=${state}`));
+      return "REDIRECT";
+    });
+    const { completeAuthFromInput, createOAuthRuntime, hasPendingAuth, startAuth, shutdownOAuth } = await import("../mcp-auth-flow.ts");
+    const runtimeA = createOAuthRuntime();
+    const runtimeB = createOAuthRuntime();
+    const definition = { auth: "oauth" as const };
+
+    await startAuth("shared", "https://a.example.com/mcp", definition, { runtime: runtimeA });
+    await startAuth("shared", "https://b.example.com/mcp", definition, { runtime: runtimeB });
+
+    expect(states).toHaveLength(2);
+    expect(states[0]).not.toBe(states[1]);
+    expect(hasPendingAuth("shared", undefined, runtimeA)).toBe(true);
+    expect(hasPendingAuth("shared", undefined, runtimeB)).toBe(true);
+
+    await expect(completeAuthFromInput("shared", `code=code-a&state=${states[0]}`, { runtime: runtimeA })).resolves.toBe("authenticated");
+    await expect(completeAuthFromInput("shared", `code=code-b&state=${states[1]}`, { runtime: runtimeB })).resolves.toBe("authenticated");
+    expect(verifiers).toEqual(["verifier-1", "verifier-2"]);
+
+    await shutdownOAuth(runtimeA);
+    await shutdownOAuth(runtimeA);
+    expect(hasPendingAuth("shared", undefined, runtimeA)).toBe(false);
+    expect(mocks.stopCallbackServer).not.toHaveBeenCalled();
+
+    await shutdownOAuth(runtimeB);
+    expect(hasPendingAuth("shared", undefined, runtimeB)).toBe(false);
+    expect(mocks.stopCallbackServer).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels only the stopped runtime's callback while another flow remains active", async () => {
+    const states: string[] = [];
+    mocks.sdkAuth.mockImplementation(async (provider, options) => {
+      if (options.authorizationCode) return "AUTHORIZED";
+      const state = await provider.state();
+      states.push(state);
+      await provider.saveCodeVerifier(`verifier-${states.length}`);
+      await provider.redirectToAuthorization(new URL(`https://auth.example.com/authorize?state=${state}`));
+      return "REDIRECT";
+    });
+    const { completeAuthFromInput, createOAuthRuntime, hasPendingAuth, startAuth, shutdownOAuth } = await import("../mcp-auth-flow.ts");
+    const runtimeA = createOAuthRuntime();
+    const runtimeB = createOAuthRuntime();
+    const definition = { auth: "oauth" as const };
+
+    await startAuth("shared", "https://a.example.com/mcp", definition, { runtime: runtimeA });
+    await startAuth("shared", "https://b.example.com/mcp", definition, { runtime: runtimeB });
+    await shutdownOAuth(runtimeA);
+
+    expect(mocks.cancelPendingCallback).toHaveBeenCalledWith(states[0]);
+    expect(hasPendingAuth("shared", undefined, runtimeB)).toBe(true);
+    expect(mocks.stopCallbackServer).not.toHaveBeenCalled();
+    await expect(completeAuthFromInput("shared", `code=code-b&state=${states[1]}`, { runtime: runtimeB })).resolves.toBe("authenticated");
+    await shutdownOAuth(runtimeB);
+  });
+
+  it("does not reactivate a stopped runtime after a stale auth call", async () => {
+    const { createOAuthRuntime, getAuthStatus, shutdownOAuth } = await import("../mcp-auth-flow.ts");
+    const staleRuntime = createOAuthRuntime();
+    await shutdownOAuth(staleRuntime);
+    mocks.stopCallbackServer.mockClear();
+
+    await expect(getAuthStatus("stale", { runtime: staleRuntime })).rejects.toThrow("OAuth runtime stopped");
+
+    const liveRuntime = createOAuthRuntime();
+    await shutdownOAuth(liveRuntime);
+    expect(mocks.stopCallbackServer).toHaveBeenCalledTimes(1);
+  });
+
   it("releases reserved callback state after direct completeAuth", async () => {
     const resourceMetadataUrl = "https://api.example.com/.well-known/oauth-protected-resource";
     mocks.fetch.mockResolvedValueOnce(new Response(null, {
       headers: { "www-authenticate": `Bearer resource_metadata="${resourceMetadataUrl}", scope="mcp:read"` },
     }));
+    let oauthState: string | undefined;
     mocks.sdkAuth.mockImplementationOnce(async (provider) => {
+      oauthState = await provider.state();
       await provider.redirectToAuthorization(new URL("https://auth.example.com/authorize"));
       return "REDIRECT";
     });
@@ -676,7 +761,8 @@ describe("mcp-auth-flow explicit auth", () => {
       auth: "oauth",
       headers: { "X-Tenant": "tenant-a" },
     });
-    const oauthState = getOAuthState("direct-complete");
+    expect(oauthState).toBeDefined();
+    expect(getOAuthState("direct-complete")).toBeUndefined();
 
     await expect(completeAuth("direct-complete", "auth-code")).resolves.toBe("authenticated");
 
@@ -694,7 +780,7 @@ describe("mcp-auth-flow explicit auth", () => {
       resourceMetadataUrl: new URL(resourceMetadataUrl),
       scope: "mcp:read",
     });
-    expect(mocks.releaseCallbackServer).toHaveBeenCalledWith(oauthState);
+    expect(mocks.cancelPendingCallback).toHaveBeenCalledWith(oauthState);
     expect(getOAuthState("direct-complete")).toBeUndefined();
   });
 
