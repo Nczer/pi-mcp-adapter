@@ -117,6 +117,21 @@ describe("McpServerManager HTTP bearer auth", () => {
     expect(mocks.httpTransports.at(-1)!.url.href).toBe("https://example.test/mcp");
   });
 
+  it("interpolates {env:VAR} URL and header placeholders", async () => {
+    const { McpServerManager } = await import("../server-manager.ts");
+    process.env.MCP_TEST_URL = "https://example.test/mcp";
+    process.env.MCP_TEST_BEARER_TOKEN = "brace-token";
+
+    const manager = new McpServerManager();
+    await manager.connect("remote", {
+      url: "{env:MCP_TEST_URL}",
+      headers: { Authorization: "Bearer {env:MCP_TEST_BEARER_TOKEN}" },
+    });
+
+    expect(mocks.httpTransports.at(-1)!.url.href).toBe("https://example.test/mcp");
+    expect(mocks.httpTransports.at(-1)!.options.requestInit?.headers?.Authorization).toBe("Bearer brace-token");
+  });
+
   it("fails closed when URL placeholders are missing", async () => {
     const { McpServerManager } = await import("../server-manager.ts");
     delete process.env.MCP_TEST_URL;
@@ -126,6 +141,9 @@ describe("McpServerManager HTTP bearer auth", () => {
       url: "https://${MCP_TEST_URL}/mcp",
     })).rejects.toThrow("Missing environment variable in MCP server URL: MCP_TEST_URL");
 
+    await expect(manager.connect("brace-remote", {
+      url: "https://{env:MCP_TEST_URL}/mcp",
+    })).rejects.toThrow("Missing environment variable in MCP server URL: MCP_TEST_URL");
     expect(mocks.httpTransports).toHaveLength(0);
   });
 

@@ -62,18 +62,29 @@ export function getConfigPathFromArgv(): string | undefined {
 export function interpolateEnvVars(value: string): string {
   return value
     .replace(/\$\{(\w+)\}/g, (_, name) => process.env[name] ?? "")
-    .replace(/\$env:(\w+)/g, (_, name) => process.env[name] ?? "");
+    .replace(/\$env:(\w+)/g, (_, name) => process.env[name] ?? "")
+    .replace(/\{env:(\w+)\}/g, (_, name) => process.env[name] ?? "");
 }
 
 function getMissingEnvVars(value: string): string[] {
   const missing = new Set<string>();
-  for (const match of value.matchAll(/\$\{(\w+)\}|\$env:(\w+)/g)) {
-    const name = match[1] ?? match[2];
+  for (const match of value.matchAll(/\$\{(\w+)\}|\$env:(\w+)|\{env:(\w+)\}/g)) {
+    const name = match[1] ?? match[2] ?? match[3];
     if (name && process.env[name] === undefined) {
       missing.add(name);
     }
   }
   return [...missing];
+}
+
+export function toStringRecord(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+
+  const result: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry === "string") result[key] = entry;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 export function interpolateEnvRecord(values: Record<string, string> | undefined): Record<string, string> | undefined {
