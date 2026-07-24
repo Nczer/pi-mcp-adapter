@@ -64,14 +64,9 @@ export interface UiProxyResult<T = Record<string, unknown>> {
 }
 
 export interface UiResourceCsp {
+  resourceDomains?: string[];
   connectDomains?: string[];
-  scriptDomains?: string[];
-  styleDomains?: string[];
-  fontDomains?: string[];
-  imgDomains?: string[];
-  mediaDomains?: string[];
   frameDomains?: string[];
-  workerDomains?: string[];
   baseUriDomains?: string[];
 }
 
