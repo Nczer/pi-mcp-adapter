@@ -155,7 +155,11 @@ export async function initializeMcp(
 
   try {
     void ctx.hasUI;
-  } catch {
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes("extension ctx is stale after session replacement or reload")) {
+      throw error;
+    }
     // Session torn down while the eager/keep-alive connect(s) above were still
     // in flight — abandon quietly instead of touching a dead ctx below.
     return state;

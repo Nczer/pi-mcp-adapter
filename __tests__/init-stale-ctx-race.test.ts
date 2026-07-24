@@ -30,13 +30,13 @@ function extensionApi(): ExtensionAPI {
 // runner.assertActive() on every read, so a session torn down mid-connect makes
 // the *next* read throw — not just future ones. `armed` flips true to simulate
 // session.dispose() firing while the eager connect below is still in flight.
-function contextThatGoesStale(armed: { value: boolean }): ExtensionContext {
+function contextThatGoesStale(armed: { value: boolean }, message?: string): ExtensionContext {
   return {
     cwd: "/tmp/project",
     get hasUI() {
       if (armed.value) {
         throw new Error(
-          "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload()."
+          message ?? "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload()."
         );
       }
       return true;
@@ -85,5 +85,33 @@ describe("initializeMcp vs. a ctx invalidated mid-connect", () => {
     // A session torn down mid-connect is an ordinary, expected race:
     // initializeMcp should abandon quietly instead of rejecting.
     await pending;
+  });
+
+  it("still rejects unrelated ctx.hasUI failures after startup connects", async () => {
+    mocks.loadMcpConfig.mockReturnValue({
+      mcpServers: {
+        demo: { command: "npx", args: ["-y", "demo-server"], lifecycle: "eager" },
+      },
+      settings: {},
+    });
+
+    let resolveConnect!: (value: unknown) => void;
+    mocks.connect.mockImplementation(
+      () => new Promise((resolve) => { resolveConnect = resolve; })
+    );
+
+    const { initializeMcp } = await import("../init.ts");
+
+    const armed = { value: false };
+    const ctx = contextThatGoesStale(armed, "unexpected ui failure");
+
+    const pending = initializeMcp(extensionApi(), ctx);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    armed.value = true;
+    resolveConnect({ status: "connected", tools: [], resources: [] });
+
+    await expect(pending).rejects.toThrow("unexpected ui failure");
   });
 });
