@@ -10,6 +10,7 @@ describe("npx-resolver", () => {
 
   beforeEach(() => {
     vi.resetModules();
+    vi.doUnmock("cross-spawn");
   });
 
   afterEach(() => {
@@ -43,6 +44,64 @@ describe("npx-resolver", () => {
     expect(result).not.toBeNull();
     expect(existsSync(join(agentDir, "mcp-npx-cache.json"))).toBe(true);
     expect(existsSync(join(home, ".pi", "agent", "mcp-npx-cache.json"))).toBe(false);
+  });
+
+  it("uses cross-spawn to read npm's cache directory", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-npx-home-"));
+    const agentDir = mkdtempSync(join(tmpdir(), "pi-mcp-npx-agent-"));
+    const npmCache = mkdtempSync(join(tmpdir(), "pi-mcp-npx-cache-"));
+
+    process.env.HOME = home;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    delete process.env.NPM_CONFIG_CACHE;
+
+    const binPath = writeCachedPackage(npmCache, "demo-pkg");
+    const crossSpawn = vi.fn();
+    const sync = vi.fn(() => ({ status: 0, stdout: `${npmCache}\n` }));
+    Object.assign(crossSpawn, { sync });
+    vi.doMock("cross-spawn", () => ({ default: crossSpawn }));
+
+    const { resolveNpxBinary } = await import("../npx-resolver.ts");
+    const result = await resolveNpxBinary("npx", ["-y", "demo-pkg"]);
+
+    expect(sync).toHaveBeenCalledWith("npm", ["config", "get", "cache"], { encoding: "utf-8" });
+    expect(crossSpawn).not.toHaveBeenCalled();
+    expect(result?.binPath).toBe(binPath);
+  });
+
+  it("uses cross-spawn to populate npm's npx cache on the slow path", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-npx-home-"));
+    const agentDir = mkdtempSync(join(tmpdir(), "pi-mcp-npx-agent-"));
+    const npmCache = mkdtempSync(join(tmpdir(), "pi-mcp-npx-cache-"));
+
+    process.env.HOME = home;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    delete process.env.NPM_CONFIG_CACHE;
+
+    const proc = {
+      kill: vi.fn(),
+      on: vi.fn((event: string, callback: () => void) => {
+        if (event === "close") queueMicrotask(callback);
+        return proc;
+      }),
+    };
+    const crossSpawn = vi.fn(() => {
+      writeCachedPackage(npmCache, "demo-pkg");
+      return proc;
+    });
+    const sync = vi.fn(() => ({ status: 0, stdout: `${npmCache}\n` }));
+    Object.assign(crossSpawn, { sync });
+    vi.doMock("cross-spawn", () => ({ default: crossSpawn }));
+
+    const { resolveNpxBinary } = await import("../npx-resolver.ts");
+    const result = await resolveNpxBinary("npx", ["-y", "demo-pkg"]);
+
+    expect(crossSpawn).toHaveBeenCalledWith(
+      "npm",
+      ["exec", "--yes", "--package", "demo-pkg", "--", "node", "-e", "1"],
+      { stdio: "ignore" },
+    );
+    expect(result).not.toBeNull();
   });
 
   it("preserves npx separators for wrapper package arguments", async () => {

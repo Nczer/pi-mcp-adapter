@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deferred loading the regex safety checker until regex search is used, improving startup time. Thanks @kaushikgopal for PR #175.
 
 ### Fixed
+- Kept npm cache lookups working on Windows by resolving `npm` through `cross-spawn`. Thanks @zeyadhost for PR #201.
 - Kept direct MCP tool registration working when a host TypeBox shim does not expose `Type.Unsafe`. Thanks @RaviTharuma for PR #198.
 - Kept exact `npx` package specs from reusing a different same-name package version from npm's `_npx` cache. Thanks @danhrahal for issue #178.
 - Kept POST-only Streamable HTTP servers on the Streamable HTTP transport when the optional GET stream returns 405. Thanks @ramhaidar for issue #204.
