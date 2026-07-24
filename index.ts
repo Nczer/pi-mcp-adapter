@@ -168,6 +168,28 @@ export default function mcpAdapter(pi: ExtensionAPI) {
 
   pi.registerCommand("mcp", {
     description: "Show MCP server status",
+    getArgumentCompletions: (prefix: string) => {
+      const normalized = prefix.trimStart();
+      const argumentMatch = normalized.match(/^(\S+)\s+(.*)$/);
+      if (!argumentMatch) {
+        const subcommands = [
+          { value: "reconnect", label: "reconnect — Reconnect servers" },
+          { value: "tools", label: "tools — List all tools" },
+          { value: "setup", label: "setup — Configure MCP servers" },
+          { value: "logout", label: "logout — Clear server credentials" },
+          { value: "status", label: "status — Show server status" },
+        ].filter(({ value }) => value.startsWith(normalized));
+        return subcommands.length > 0 ? subcommands : null;
+      }
+
+      const [, subcommand, argumentPrefix] = argumentMatch;
+      if ((subcommand !== "reconnect" && subcommand !== "logout") || !state) return null;
+
+      const servers = Object.keys(state.config.mcpServers)
+        .filter((serverName) => serverName.startsWith(argumentPrefix.trimStart()))
+        .map((serverName) => ({ value: `${subcommand} ${serverName}`, label: serverName }));
+      return servers.length > 0 ? servers : null;
+    },
     handler: async (args, ctx) => {
       if (!state && initPromise) {
         try {
