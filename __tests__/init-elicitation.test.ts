@@ -51,6 +51,23 @@ describe("initializeMcp elicitation config", () => {
     mocks.loadMcpConfig.mockReturnValue({ mcpServers: {}, settings: {} });
   });
 
+  it("uses an isolated programmatic config without reading flags or files", async () => {
+    const config = {
+      mcpServers: {},
+      settings: { sampling: false as const },
+    };
+    const api = extensionApi();
+    const { initializeMcp } = await import("../init.ts");
+    const { createMcpRuntimeOwner } = await import("../runtime-owner.ts");
+    const state = await initializeMcp(api, context({ hasUI: false }), createMcpRuntimeOwner(), { config });
+
+    expect(api.getFlag).not.toHaveBeenCalled();
+    expect(mocks.loadMcpConfig).not.toHaveBeenCalled();
+    expect(state.config).toEqual(config);
+    expect(state.config).not.toBe(config);
+    expect(state.programmaticConfig).toBe(true);
+  });
+
   it("enables form and URL elicitation in TUI mode", async () => {
     const { initializeMcp } = await import("../init.ts");
     const { McpServerManager } = await import("../server-manager.ts");

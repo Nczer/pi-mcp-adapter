@@ -3,6 +3,19 @@
   "version": "2.11.0",
   "description": "MCP (Model Context Protocol) adapter extension for Pi coding agent",
   "type": "module",
+  "types": "./index.ts",
+  "exports": {
+    ".": {
+      "types": "./index.ts",
+      "import": "./index.ts",
+      "default": "./index.ts"
+    },
+    "./types": {
+      "types": "./types.ts",
+      "import": "./types.ts",
+      "default": "./types.ts"
+    }
+  },
   "license": "MIT",
   "author": "Nico Bailon",
   "bin": {

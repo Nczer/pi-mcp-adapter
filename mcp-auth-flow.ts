@@ -27,7 +27,6 @@ import {
   clearClientInfo,
   clearTokens,
   clearCodeVerifier,
-  updateOAuthState,
   getOAuthState,
   clearOAuthState,
   getAuthBaseDir,
@@ -42,10 +41,15 @@ import { combineAbortSignals, isAbortError } from "./runtime-owner.ts"
 /** Auth status for a server */
 export type AuthStatus = "authenticated" | "expired" | "not_authenticated"
 
+export interface McpOAuthRuntime {
+  readonly signal: AbortSignal
+}
+
 export interface AuthenticateOptions {
   onAuthorizationUrl?: (authorizationUrl: string) => void | Promise<void>
   authStorageOptions?: AuthStorageOptions
   signal?: AbortSignal
+  runtime?: McpOAuthRuntime
 }
 
 type AuthDiscovery = {
@@ -62,24 +66,63 @@ type PendingAuth = {
   authStorageOptions: AuthStorageOptions
 }
 
-const pendingAuths = new Map<string, PendingAuth>()
-const pendingAuthStates = new Map<string, string>()
-const pendingAuthCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>()
+type RuntimeState = {
+  controller: AbortController
+  generation: number
+  pendingAuths: Map<string, PendingAuth>
+  pendingAuthStates: Map<string, string>
+  pendingAuthCleanupTimers: Map<string, ReturnType<typeof setTimeout>>
+  pendingAuthentications: Map<string, Promise<AuthStatus>>
+}
 
-// Deduplicate concurrent authenticate() calls per server.
-const pendingAuthentications = new Map<string, Promise<AuthStatus>>()
-let oauthRuntimeSignal: AbortSignal | undefined
-let oauthGeneration = 0
+const runtimeStates = new WeakMap<McpOAuthRuntime, RuntimeState>()
+const activeRuntimes = new Set<McpOAuthRuntime>()
+
+export function createOAuthRuntime(signal?: AbortSignal): McpOAuthRuntime {
+  const controller = new AbortController()
+  const runtime = { signal: combineAbortSignals(signal, controller.signal)! } satisfies McpOAuthRuntime
+  runtimeStates.set(runtime, {
+    controller,
+    generation: 0,
+    pendingAuths: new Map(),
+    pendingAuthStates: new Map(),
+    pendingAuthCleanupTimers: new Map(),
+    pendingAuthentications: new Map(),
+  })
+  activeRuntimes.add(runtime)
+  return runtime
+}
+
+let legacyRuntime = createOAuthRuntime()
+activeRuntimes.delete(legacyRuntime)
+
+function getRuntime(options?: AuthenticateOptions): McpOAuthRuntime {
+  if (options?.runtime) {
+    options.runtime.signal.throwIfAborted()
+    activeRuntimes.add(options.runtime)
+    return options.runtime
+  }
+  if (legacyRuntime.signal.aborted) legacyRuntime = createOAuthRuntime()
+  activeRuntimes.add(legacyRuntime)
+  return legacyRuntime
+}
+
+function getRuntimeState(runtime: McpOAuthRuntime): RuntimeState {
+  const state = runtimeStates.get(runtime)
+  if (!state) throw new Error("Unknown OAuth runtime")
+  return state
+}
 
 function getPendingAuthKey(serverName: string, options: AuthStorageOptions): string {
   return `${serverName}|${getAuthBaseDir(options)}`
 }
 
-export function hasPendingAuth(serverName: string, options?: AuthStorageOptions): boolean {
+export function hasPendingAuth(serverName: string, options?: AuthStorageOptions, runtime?: McpOAuthRuntime): boolean {
+  const state = getRuntimeState(runtime ?? legacyRuntime)
   if (options) {
-    return pendingAuths.has(getPendingAuthKey(serverName, options))
+    return state.pendingAuths.has(getPendingAuthKey(serverName, options))
   }
-  return Array.from(pendingAuths.values()).some(pendingAuth => pendingAuth.serverName === serverName)
+  return Array.from(state.pendingAuths.values()).some(pendingAuth => pendingAuth.serverName === serverName)
 }
 
 /** Timeout for manual auth completion (5 minutes) */
@@ -178,7 +221,7 @@ async function probeAuthDiscovery(serverUrl: string, definition?: ServerEntry, s
     await response.body?.cancel().catch(() => {})
     return { ...(resourceMetadataUrl ? { resourceMetadataUrl } : {}), ...(scope ? { scope } : {}) }
   } catch (error) {
-    if (signal?.aborted || oauthRuntimeSignal?.aborted) throwIfAborted(combineAbortSignals(signal, oauthRuntimeSignal))
+    if (signal?.aborted) throwIfAborted(signal)
     return {}
   } finally {
     clearTimeout(timer)
@@ -230,10 +273,12 @@ export async function startAuth(
   definition?: ServerEntry,
   options: AuthenticateOptions = {},
 ): Promise<{ authorizationUrl: string }> {
+  const runtime = getRuntime(options)
+  const runtimeState = getRuntimeState(runtime)
   const config = definition ? extractOAuthConfig(definition) : {}
   const authStorageOptions = options.authStorageOptions ?? {}
-  const signal = combineAbortSignals(oauthRuntimeSignal, options.signal)
-  const generation = oauthGeneration
+  const signal = combineAbortSignals(runtime.signal, options.signal)
+  const generation = runtimeState.generation
   throwIfAborted(signal)
 
   if (config.grantType === "client_credentials") {
@@ -248,7 +293,7 @@ export async function startAuth(
       onRedirect: async () => {
         throw new Error("Browser redirect is not used for client_credentials flow")
       },
-    }, authStorageOptions)
+    }, authStorageOptions, runtime.signal)
     try {
       const discovery = await probeAuthDiscovery(serverUrl, definition, signal)
       throwIfAborted(signal)
@@ -263,7 +308,7 @@ export async function startAuth(
     }
   }
 
-  const existingPendingAuth = pendingAuths.get(getPendingAuthKey(serverName, authStorageOptions))
+  const existingPendingAuth = runtimeState.pendingAuths.get(getPendingAuthKey(serverName, authStorageOptions))
   if (existingPendingAuth?.serverUrl === serverUrl) {
     return { authorizationUrl: existingPendingAuth.authorizationUrl }
   }
@@ -294,7 +339,7 @@ export async function startAuth(
     onRedirect: async (url) => {
       capturedUrl = url
     },
-  }, authStorageOptions)
+  }, authStorageOptions, runtime.signal, oauthState)
 
   try {
     const storedAuth = await getAuthForUrl(serverName, serverUrl, authStorageOptions)
@@ -314,7 +359,6 @@ export async function startAuth(
       }
     }
 
-    await updateOAuthState(serverName, oauthState, serverUrl, authStorageOptions)
     throwIfAborted(signal)
 
     const discovery = await probeAuthDiscovery(serverUrl, definition, signal)
@@ -330,12 +374,12 @@ export async function startAuth(
     if (!capturedUrl) {
       throw new UnauthorizedError("OAuth authorization URL was not provided")
     }
-    await setPendingAuth(serverName, { serverName, authProvider, serverUrl, authorizationUrl: capturedUrl.toString(), discovery, authStorageOptions }, oauthState, signal, generation)
+    await setPendingAuth(runtime, serverName, { serverName, authProvider, serverUrl, authorizationUrl: capturedUrl.toString(), discovery, authStorageOptions }, oauthState, signal, generation)
     return { authorizationUrl: capturedUrl.toString() }
   } catch (error) {
     authProvider.deactivate()
     try {
-      await clearPendingAuth(serverName, oauthState, authStorageOptions)
+      await clearPendingAuth(runtime, serverName, oauthState, authStorageOptions)
     } catch (cleanupError) {
       throw new AggregateError([error, cleanupError], "OAuth startup cleanup failed")
     }
@@ -344,46 +388,49 @@ export async function startAuth(
 }
 
 async function setPendingAuth(
+  runtime: McpOAuthRuntime,
   serverName: string,
   pendingAuth: PendingAuth,
   oauthState: string,
   signal?: AbortSignal,
-  generation = oauthGeneration,
+  generation = getRuntimeState(runtime).generation,
 ): Promise<void> {
+  const state = getRuntimeState(runtime)
   const key = getPendingAuthKey(serverName, pendingAuth.authStorageOptions)
-  await clearPendingAuth(serverName, undefined, pendingAuth.authStorageOptions)
+  await clearPendingAuth(runtime, serverName, undefined, pendingAuth.authStorageOptions)
   throwIfAborted(signal)
-  if (generation !== oauthGeneration) throw new Error("OAuth runtime stopped")
-  pendingAuths.set(key, pendingAuth)
-  pendingAuthStates.set(key, oauthState)
+  if (generation !== state.generation) throw new Error("OAuth runtime stopped")
+  state.pendingAuths.set(key, pendingAuth)
+  state.pendingAuthStates.set(key, oauthState)
   const cleanupTimer = setTimeout(() => {
-    void clearPendingAuth(serverName, oauthState, pendingAuth.authStorageOptions).catch(error => {
+    void clearPendingAuth(runtime, serverName, oauthState, pendingAuth.authStorageOptions).catch(error => {
       console.error(`MCP Auth: Timed-out flow cleanup failed: ${formatTerminalError(error)}`)
     })
   }, MANUAL_AUTH_TIMEOUT_MS)
   cleanupTimer.unref?.()
-  pendingAuthCleanupTimers.set(key, cleanupTimer)
+  state.pendingAuthCleanupTimers.set(key, cleanupTimer)
 }
 
-async function clearPendingAuth(serverName: string, oauthState?: string, fallbackStorageOptions: AuthStorageOptions = {}): Promise<void> {
+async function clearPendingAuth(runtime: McpOAuthRuntime, serverName: string, oauthState?: string, fallbackStorageOptions: AuthStorageOptions = {}): Promise<void> {
+  const state = getRuntimeState(runtime)
   const key = getPendingAuthKey(serverName, fallbackStorageOptions)
-  const pendingAuth = pendingAuths.get(key)
+  const pendingAuth = state.pendingAuths.get(key)
   const authStorageOptions = pendingAuth?.authStorageOptions ?? fallbackStorageOptions
-  const pendingState = pendingAuthStates.get(key)
+  const pendingState = state.pendingAuthStates.get(key)
   if (oauthState && pendingState && pendingState !== oauthState) return
 
-  const timer = pendingAuthCleanupTimers.get(key)
+  const timer = state.pendingAuthCleanupTimers.get(key)
   if (timer) {
     clearTimeout(timer)
-    pendingAuthCleanupTimers.delete(key)
+    state.pendingAuthCleanupTimers.delete(key)
   }
 
   pendingAuth?.authProvider.deactivate()
-  pendingAuths.delete(key)
-  pendingAuthStates.delete(key)
+  state.pendingAuths.delete(key)
+  state.pendingAuthStates.delete(key)
   const stateToRelease = pendingState ?? oauthState
   if (stateToRelease) {
-    releaseCallbackServer(stateToRelease)
+    cancelPendingCallback(stateToRelease)
     const storedState = await getOAuthState(serverName, authStorageOptions)
     if (storedState === stateToRelease) {
       await clearOAuthState(serverName, authStorageOptions)
@@ -455,11 +502,14 @@ export async function completeAuthFromInput(
   input: string,
   options: AuthenticateOptions = {},
 ): Promise<AuthStatus> {
+  const runtime = getRuntime(options)
+  const runtimeState = getRuntimeState(runtime)
   const fallbackAuthStorageOptions = options.authStorageOptions ?? {}
-  const signal = combineAbortSignals(oauthRuntimeSignal, options.signal)
+  const signal = combineAbortSignals(runtime.signal, options.signal)
   throwIfAborted(signal)
-  const authStorageOptions = pendingAuths.get(getPendingAuthKey(serverName, fallbackAuthStorageOptions))?.authStorageOptions ?? fallbackAuthStorageOptions
-  const oauthState = await getOAuthState(serverName, authStorageOptions)
+  const key = getPendingAuthKey(serverName, fallbackAuthStorageOptions)
+  const authStorageOptions = runtimeState.pendingAuths.get(key)?.authStorageOptions ?? fallbackAuthStorageOptions
+  const oauthState = runtimeState.pendingAuthStates.get(key)
   throwIfAborted(signal)
   const code = parseAuthorizationCodeInput(input, oauthState)
   return completeAuth(serverName, code, options)
@@ -473,17 +523,19 @@ export async function completeAuth(
   authorizationCode: string,
   options: AuthenticateOptions = {},
 ): Promise<AuthStatus> {
+  const runtime = getRuntime(options)
+  const runtimeState = getRuntimeState(runtime)
   const fallbackAuthStorageOptions = options.authStorageOptions ?? {}
-  const signal = combineAbortSignals(oauthRuntimeSignal, options.signal)
+  const signal = combineAbortSignals(runtime.signal, options.signal)
   throwIfAborted(signal)
   const key = getPendingAuthKey(serverName, fallbackAuthStorageOptions)
-  const pendingAuth = pendingAuths.get(key)
+  const pendingAuth = runtimeState.pendingAuths.get(key)
   const authStorageOptions = pendingAuth?.authStorageOptions ?? fallbackAuthStorageOptions
   if (!pendingAuth) {
     throw new Error(`No pending OAuth flow for server: ${serverName}`)
   }
 
-  const oauthState = await getOAuthState(serverName, authStorageOptions)
+  const oauthState = runtimeState.pendingAuthStates.get(key)
   throwIfAborted(signal)
 
   try {
@@ -498,14 +550,14 @@ export async function completeAuth(
     }
   } catch (error) {
     try {
-      await clearPendingAuth(serverName, oauthState, authStorageOptions)
+      await clearPendingAuth(runtime, serverName, oauthState, authStorageOptions)
     } catch (cleanupError) {
       throw new AggregateError([error, cleanupError], "OAuth completion cleanup failed")
     }
     throw error
   }
 
-  await clearPendingAuth(serverName, oauthState, authStorageOptions)
+  await clearPendingAuth(runtime, serverName, oauthState, authStorageOptions)
   return "authenticated"
 }
 
@@ -523,18 +575,20 @@ export async function authenticate(
   definition?: ServerEntry,
   options: AuthenticateOptions = {},
 ): Promise<AuthStatus> {
+  const runtime = getRuntime(options)
+  const runtimeState = getRuntimeState(runtime)
   const authStorageOptions = options.authStorageOptions ?? {}
-  const signal = combineAbortSignals(oauthRuntimeSignal, options.signal)
+  const signal = combineAbortSignals(runtime.signal, options.signal)
   throwIfAborted(signal)
   const authKey = `${serverName}|${serverUrl}|${getAuthBaseDir(authStorageOptions)}`
-  const inFlight = pendingAuthentications.get(authKey)
+  const inFlight = runtimeState.pendingAuthentications.get(authKey)
   if (inFlight) {
     return inFlight
   }
 
   const operation = (async (): Promise<AuthStatus> => {
     // Start auth flow
-    const { authorizationUrl } = await startAuth(serverName, serverUrl, definition, { ...options, signal })
+    const { authorizationUrl } = await startAuth(serverName, serverUrl, definition, { ...options, signal, runtime })
 
     // If no auth URL needed, already authenticated
     if (!authorizationUrl) {
@@ -546,7 +600,7 @@ export async function authenticate(
       // Get the state that was already generated and stored in startAuth().
       // Keep this lookup and its abort check inside the cleanup boundary because
       // startAuth has already reserved callback state at this point.
-      oauthState = await getOAuthState(serverName, authStorageOptions)
+      oauthState = runtimeState.pendingAuthStates.get(getPendingAuthKey(serverName, authStorageOptions))
       throwIfAborted(signal)
       if (!oauthState) {
         throw new Error("OAuth state not found - this should not happen")
@@ -573,25 +627,15 @@ export async function authenticate(
       // Wait for callback
       const code = await abortable(callbackPromise, signal)
 
-      // Validate state
-      const storedState = await getOAuthState(serverName, authStorageOptions)
-      if (storedState !== oauthState) {
-        const mismatchError = new Error("OAuth state mismatch - potential CSRF attack")
-        try {
-          await clearOAuthState(serverName, authStorageOptions)
-        } catch (cleanupError) {
-          throw new AggregateError([mismatchError, cleanupError], "OAuth state mismatch cleanup failed")
-        }
-        throw mismatchError
-      }
-      await clearOAuthState(serverName, authStorageOptions)
+      // The callback server accepted only the flow-local reserved state.
+      throwIfAborted(signal)
 
       // Complete the auth
-      return await completeAuth(serverName, code, { ...options, signal })
+      return await completeAuth(serverName, code, { ...options, signal, runtime })
     } catch (error) {
       if (oauthState) cancelPendingCallback(oauthState)
       try {
-        await clearPendingAuth(serverName, oauthState, authStorageOptions)
+        await clearPendingAuth(runtime, serverName, oauthState, authStorageOptions)
       } catch (cleanupError) {
         throw new AggregateError([error, cleanupError], "OAuth cancellation cleanup failed")
       }
@@ -599,13 +643,13 @@ export async function authenticate(
     }
   })()
 
-  pendingAuthentications.set(authKey, operation)
+  runtimeState.pendingAuthentications.set(authKey, operation)
 
   try {
     return await operation
   } finally {
-    if (pendingAuthentications.get(authKey) === operation) {
-      pendingAuthentications.delete(authKey)
+    if (runtimeState.pendingAuthentications.get(authKey) === operation) {
+      runtimeState.pendingAuthentications.delete(authKey)
     }
   }
 }
@@ -622,8 +666,9 @@ export async function getValidToken(
   serverUrl: string,
   options: AuthenticateOptions = {},
 ): Promise<StoredTokens | null> {
+  const runtime = getRuntime(options)
   const authStorageOptions = options.authStorageOptions ?? {}
-  const signal = combineAbortSignals(oauthRuntimeSignal, options.signal)
+  const signal = combineAbortSignals(runtime.signal, options.signal)
   throwIfAborted(signal)
   // Check if we have valid tokens
   const entry = await getAuthForUrl(serverName, serverUrl, authStorageOptions)
@@ -646,7 +691,7 @@ export async function getValidToken(
       // Create auth provider for token refresh
       const authProvider = new McpOAuthProvider(serverName, serverUrl, {}, {
         onRedirect: async () => {},
-      }, authStorageOptions)
+      }, authStorageOptions, runtime.signal)
 
       try {
         const clientInfo = await authProvider.clientInformation()
@@ -687,6 +732,7 @@ export async function getValidToken(
  * @returns The current auth status
  */
 export async function getAuthStatus(serverName: string, options: AuthenticateOptions = {}): Promise<AuthStatus> {
+  const runtime = getRuntime(options)
   const authStorageOptions = options.authStorageOptions ?? {}
   const hasTokens = await hasStoredTokens(serverName, authStorageOptions)
   if (!hasTokens) return "not_authenticated"
@@ -701,7 +747,8 @@ export async function getAuthStatus(serverName: string, options: AuthenticateOpt
  * @param serverName - The name of the MCP server
  */
 export async function removeAuth(serverName: string, options: AuthenticateOptions = {}): Promise<void> {
-  const signal = combineAbortSignals(oauthRuntimeSignal, options.signal)
+  const runtime = getRuntime(options)
+  const signal = combineAbortSignals(runtime.signal, options.signal)
   throwIfAborted(signal)
   const authStorageOptions = options.authStorageOptions ?? {}
   const oauthState = await getOAuthState(serverName, authStorageOptions)
@@ -709,7 +756,7 @@ export async function removeAuth(serverName: string, options: AuthenticateOption
   if (oauthState) {
     cancelPendingCallback(oauthState)
   }
-  await clearPendingAuth(serverName, oauthState, authStorageOptions)
+  await clearPendingAuth(runtime, serverName, oauthState, authStorageOptions)
   throwIfAborted(signal)
   clearAllCredentials(serverName, authStorageOptions)
   await clearOAuthState(serverName, authStorageOptions)
@@ -744,21 +791,37 @@ export function supportsOAuth(definition: ServerEntry): boolean {
  * Initialize the OAuth system on startup.
  * OAuth callback binding is lazy and starts from startAuth() only.
  */
-export async function initializeOAuth(signal?: AbortSignal): Promise<void> {
-  oauthRuntimeSignal = signal
-  oauthGeneration += 1
+export async function initializeOAuth(
+  runtimeOrSignal?: McpOAuthRuntime | AbortSignal,
+): Promise<McpOAuthRuntime> {
+  if (runtimeOrSignal && "signal" in runtimeOrSignal) {
+    runtimeOrSignal.signal.throwIfAborted()
+    activeRuntimes.add(runtimeOrSignal)
+    return runtimeOrSignal
+  }
+
+  await shutdownOAuth(legacyRuntime)
+  legacyRuntime = createOAuthRuntime(runtimeOrSignal as AbortSignal | undefined)
+  return legacyRuntime
 }
 
 /**
- * Shutdown the OAuth system.
- * Stops the callback server and cancels pending auths.
+ * Shutdown one OAuth runtime. The callback server remains process-shared while
+ * another runtime has pending/reserved callback state or is still active.
  */
-export async function shutdownOAuth(): Promise<void> {
-  oauthGeneration += 1
-  oauthRuntimeSignal = undefined
-  for (const pendingAuth of Array.from(pendingAuths.values())) {
-    await clearPendingAuth(pendingAuth.serverName, undefined, pendingAuth.authStorageOptions)
+export async function shutdownOAuth(runtime: McpOAuthRuntime = legacyRuntime): Promise<void> {
+  const state = getRuntimeState(runtime)
+  if (state.controller.signal.aborted) return
+  state.generation += 1
+  state.controller.abort(new Error("OAuth runtime stopped"))
+  for (const callbackState of Array.from(state.pendingAuthStates.values())) cancelPendingCallback(callbackState)
+  for (const pendingAuth of Array.from(state.pendingAuths.values())) {
+    await clearPendingAuth(runtime, pendingAuth.serverName, undefined, pendingAuth.authStorageOptions)
   }
-  for (const state of Array.from(pendingAuthStates.values())) cancelPendingCallback(state)
-  await stopCallbackServer()
+  state.pendingAuthentications.clear()
+  activeRuntimes.delete(runtime)
+
+  if (activeRuntimes.size === 0) {
+    await stopCallbackServer()
+  }
 }

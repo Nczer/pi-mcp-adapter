@@ -368,6 +368,11 @@ export interface McpConfig {
   settings?: McpSettings;
 }
 
+export interface McpAdapterOptions {
+  config?: McpConfig;
+  configPath?: string;
+}
+
 // Alias for clarity
 export type ServerDefinition = ServerEntry;
 

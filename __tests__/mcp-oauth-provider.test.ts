@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { McpOAuthProvider } from "../mcp-oauth-provider.ts";
-import { saveAuthEntry, updateOAuthState } from "../mcp-auth.ts";
+import { saveAuthEntry } from "../mcp-auth.ts";
 
 describe("McpOAuthProvider clientMetadata scope", () => {
   it("includes configured scope in authorization_code client metadata", () => {
@@ -199,15 +199,14 @@ describe("McpOAuthProvider authorization fallback", () => {
     expect(redirected).toBe(false);
   });
 
-  it("still redirects when startAuth has seeded OAuth state", async () => {
+  it("redirects when the active provider owns OAuth state", async () => {
     const authUrl = new URL("https://auth.example.com/authorize");
     let redirected: URL | undefined;
-    updateOAuthState("redirect-active", "state-abc", serverUrl);
     const provider = new McpOAuthProvider("redirect-active", serverUrl, {}, {
       onRedirect: async (url) => {
         redirected = url;
       },
-    });
+    }, {}, undefined, "state-abc");
 
     await provider.redirectToAuthorization(authUrl);
 

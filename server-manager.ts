@@ -20,7 +20,7 @@ import { serverStreamResultPatchNotificationSchema } from "./types.ts";
 import { resolveNpxBinary } from "./npx-resolver.ts";
 import { logger } from "./logger.ts";
 import { McpOAuthProvider } from "./mcp-oauth-provider.ts";
-import { extractOAuthConfig, supportsOAuth } from "./mcp-auth-flow.ts";
+import { extractOAuthConfig, supportsOAuth, type McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import type { AuthStorageOptions } from "./mcp-auth.ts";
 import { registerSamplingHandler, type ServerSamplingConfig } from "./sampling-handler.ts";
 import {
@@ -85,6 +85,7 @@ export class McpServerManager {
   private samplingConfig: ServerSamplingConfig | undefined;
   private elicitationConfig: ServerElicitationConfig | undefined;
   private authStorageOptions: AuthStorageOptions = {};
+  private oauthRuntime: McpOAuthRuntime | undefined;
   private acceptedUrlElicitations = new Map<string, Set<string>>();
   private defaultRequestTimeoutMs: number | undefined;
   private runtimeSignal: AbortSignal | undefined;
@@ -114,6 +115,10 @@ export class McpServerManager {
 
   setAuthStorageOptions(options: AuthStorageOptions): void {
     this.authStorageOptions = options;
+  }
+
+  setOAuthRuntime(runtime: McpOAuthRuntime): void {
+    this.oauthRuntime = runtime;
   }
 
   getRequestOptions(name: string, signal?: AbortSignal): RequestOptions | undefined {
@@ -515,7 +520,8 @@ export class McpServerManager {
             // URL is captured by startAuth, no need to log
           },
         },
-        this.authStorageOptions
+        this.authStorageOptions,
+        this.oauthRuntime?.signal,
       );
     }
 

@@ -21,7 +21,7 @@ import {
   setOAuthCallbackPort,
   type McpOAuthConfig,
 } from "./mcp-oauth-provider.ts"
-import { getAuthForUrl, saveAuthEntry, updateOAuthState } from "./mcp-auth.ts"
+import { getAuthForUrl, saveAuthEntry } from "./mcp-auth.ts"
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js"
 import type { OAuthClientInformationFull, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js"
 
@@ -329,8 +329,7 @@ describe("McpOAuthProvider", () => {
         onRedirect: async (url) => {
           redirectCaptured = url
         },
-      })
-      await updateOAuthState("redirect-with-state", "state-abc", serverUrl)
+      }, {}, undefined, "state-abc")
       const testUrl = new URL("https://example.com/auth")
 
       await provider.redirectToAuthorization(testUrl)
@@ -379,7 +378,7 @@ describe("McpOAuthProvider", () => {
 
       const verifier = await provider.codeVerifier()
       assert.strictEqual(verifier, "verifier-abc-123")
-      assert.strictEqual(getAuthForUrl("code-verifier-test", serverUrl)?.codeVerifier, "verifier-abc-123")
+      assert.strictEqual(getAuthForUrl("code-verifier-test", serverUrl), undefined)
     })
 
     it("should throw when no code verifier", async () => {
@@ -419,7 +418,7 @@ describe("McpOAuthProvider", () => {
 
       const state = await provider.state()
       assert.strictEqual(state, "state-xyz-789")
-      assert.strictEqual(getAuthForUrl("state-test-save", serverUrl)?.oauthState, "state-xyz-789")
+      assert.strictEqual(getAuthForUrl("state-test-save", serverUrl), undefined)
     })
 
     it("should throw UnauthorizedError when no state is saved", async () => {

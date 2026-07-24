@@ -1,8 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { McpExtensionState } from "./state.ts";
-import type { ToolMetadata } from "./types.ts";
+import type { McpAdapterOptions, ToolMetadata } from "./types.ts";
 import { existsSync } from "node:fs";
-import { loadMcpConfig } from "./config.ts";
+import { cloneMcpConfig, loadMcpConfig } from "./config.ts";
 import { ConsentManager } from "./consent-manager.ts";
 import { McpLifecycleManager } from "./lifecycle.ts";
 import {
@@ -24,6 +24,7 @@ import { logger } from "./logger.ts";
 import { getMissingConfiguredDirectToolServers } from "./direct-tools.ts";
 import { throwIfAborted } from "./abort.ts";
 import { getAuthStorageOptions } from "./mcp-auth.ts";
+import { createOAuthRuntime, hasPendingAuth, shutdownOAuth, type McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import {
   combineAbortSignals,
   createMcpRuntimeOwner,
@@ -74,14 +75,19 @@ export function isTuiMode(ctx: Pick<ExtensionContext, "hasUI" | "mode">): boolea
   return ctx.hasUI && ctx.mode === "tui";
 }
 
+type McpInitializationOptions = McpAdapterOptions & { oauthRuntime?: McpOAuthRuntime };
+
 export async function initializeMcp(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   owner: McpRuntimeOwner = createMcpRuntimeOwner(),
+  options: McpInitializationOptions = {},
 ): Promise<McpExtensionState> {
   // Pi guards ExtensionContext getters after reload. Snapshot all values that
   // can be used by asynchronous work before the first await.
-  const configPath = pi.getFlag("mcp-config") as string | undefined;
+  const configPath = options.config !== undefined
+    ? undefined
+    : options.configPath ?? (pi.getFlag("mcp-config") as string | undefined);
   const cwd = ctx.cwd;
   const hasUI = ctx.hasUI;
   const mode = ctx.mode;
@@ -90,11 +96,16 @@ export async function initializeMcp(
   const initialSignal = ctx.signal;
   const ui = rawUi ? createOwnedUi(rawUi, owner) : undefined;
   const runtimeSignal = combineAbortSignals(owner.signal, initialSignal);
-  const config = loadMcpConfig(configPath, cwd);
+  const config = options.config !== undefined
+    ? cloneMcpConfig(options.config)
+    : loadMcpConfig(configPath, cwd);
   const authStorageOptions = getAuthStorageOptions(config.settings?.oauthDir, cwd);
 
+  const ownsOAuthRuntime = options.oauthRuntime === undefined;
+  const oauthRuntime = options.oauthRuntime ?? createOAuthRuntime(owner.signal);
   const manager = new McpServerManager(cwd);
   manager.setRuntimeSignal?.(owner.signal);
+  manager.setOAuthRuntime?.(oauthRuntime);
   manager.setDefaultRequestTimeoutMs(config.settings?.requestTimeoutMs);
   manager.setAuthStorageOptions(authStorageOptions);
   const samplingAutoApprove = config.settings?.samplingAutoApprove === true;
@@ -116,7 +127,7 @@ export async function initializeMcp(
       allowUrl: mode === "tui",
     });
   }
-  const lifecycle = new McpLifecycleManager(manager);
+  const lifecycle = new McpLifecycleManager(manager, (serverName) => hasPendingAuth(serverName, undefined, oauthRuntime));
   const toolMetadata = new Map<string, ToolMetadata[]>();
   const serverInstructions = new Map<string, string>();
   const failureTracker = new Map<string, number>();
@@ -130,6 +141,8 @@ export async function initializeMcp(
     toolMetadata,
     serverInstructions,
     config,
+    programmaticConfig: options.config !== undefined,
+    oauthRuntime,
     authStorageOptions,
     failureTracker,
     failureMessages,
@@ -148,6 +161,7 @@ export async function initializeMcp(
       pi.sendMessage(message as unknown as Parameters<typeof pi.sendMessage>[0], options);
     },
   };
+  if (ownsOAuthRuntime) owner.addCleanup(() => shutdownOAuth(oauthRuntime));
   owner.addCleanup(() => lifecycle.gracefulShutdown());
   owner.addCleanup(() => {
     if (state.uiServer) {
