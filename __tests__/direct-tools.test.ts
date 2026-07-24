@@ -365,6 +365,48 @@ describe("excludeTools filtering", () => {
     ]);
   });
 
+  it("keeps the first raw tool when sanitized live metadata names collide", () => {
+    const { metadata } = buildToolMetadata(
+      [
+        { name: "namespace.tool", description: "Dotted" },
+        { name: "namespace_tool", description: "Underscored" },
+        { name: "get_namespace.tool", description: "Tool before colliding resource" },
+      ] as any,
+      [{ name: "namespace.tool", uri: "ui://namespace.tool", description: "Resource" }] as any,
+      { command: "npx", args: ["-y", "demo"] },
+      "demo",
+      "server",
+    );
+
+    expect(metadata.map((tool) => [tool.name, tool.originalName, tool.description])).toEqual([
+      ["demo_namespace_tool", "namespace.tool", "Dotted"],
+      ["demo_get_namespace_tool", "get_namespace.tool", "Tool before colliding resource"],
+    ]);
+  });
+
+  it("keeps the first raw tool when sanitized cached metadata names collide", () => {
+    const reconstructed = reconstructToolMetadata(
+      "demo",
+      {
+        configHash: "hash",
+        cachedAt: Date.now(),
+        tools: [
+          { name: "namespace.tool", description: "Dotted" },
+          { name: "namespace_tool", description: "Underscored" },
+          { name: "get_namespace.tool", description: "Tool before colliding resource" },
+        ],
+        resources: [{ name: "namespace.tool", uri: "ui://namespace.tool", description: "Resource" }],
+      },
+      "server",
+      { command: "npx", args: ["-y", "demo"] },
+    );
+
+    expect(reconstructed.map((tool) => [tool.name, tool.originalName, tool.description])).toEqual([
+      ["demo_namespace_tool", "namespace.tool", "Dotted"],
+      ["demo_get_namespace_tool", "get_namespace.tool", "Tool before colliding resource"],
+    ]);
+  });
+
   it("filters excluded tools during direct tool registration from cache", () => {
     const config: McpConfig = {
       settings: { toolPrefix: "server" },
