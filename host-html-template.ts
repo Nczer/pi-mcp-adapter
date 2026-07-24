@@ -17,13 +17,10 @@ export interface HostHtmlTemplateInput {
 }
 
 export function buildHostHtmlTemplate(input: HostHtmlTemplateInput): string {
-  const cspContent = buildCspMetaContent(input.resource.meta.csp);
-  const resourceHtml = applyCspMeta(input.resource.html, cspContent);
   const hostContext = input.hostContext ?? {};
 
   const sessionToken = safeInlineJSON(input.sessionToken);
   const toolArgs = safeInlineJSON(input.toolArgs);
-  const uiHtml = safeInlineJSON(resourceHtml);
   const serverName = safeInlineJSON(input.serverName);
   const toolName = safeInlineJSON(input.toolName);
   const hostContextJson = safeInlineJSON(hostContext);
@@ -359,45 +356,46 @@ export function buildHostHtmlTemplate(input: HostHtmlTemplateInput): string {
 export function buildCspMetaContent(csp: UiResourceCsp | undefined): string | undefined {
   if (!csp) return undefined;
 
-  const directives: string[] = [];
-  directives.push("default-src 'none'");
+  const resourceDomains = sanitizeCspDomains(csp.resourceDomains);
+  const connectDomains = sanitizeCspDomains(csp.connectDomains);
+  const frameDomains = sanitizeCspDomains(csp.frameDomains);
+  const baseUriDomains = sanitizeCspDomains(csp.baseUriDomains);
 
-  const scriptSrc = toDirective("script-src", csp.scriptDomains);
-  const styleSrc = toDirective("style-src", csp.styleDomains);
-  const fontSrc = toDirective("font-src", csp.fontDomains);
-  const imgSrc = toDirective("img-src", csp.imgDomains);
-  const mediaSrc = toDirective("media-src", csp.mediaDomains);
-  const connectSrc = toDirective("connect-src", csp.connectDomains);
-  const frameSrc = toDirective("frame-src", csp.frameDomains);
-  const workerSrc = toDirective("worker-src", csp.workerDomains);
-  const baseUri = toDirective("base-uri", csp.baseUriDomains);
-
-  if (scriptSrc) directives.push(scriptSrc);
-  if (styleSrc) directives.push(styleSrc);
-  if (fontSrc) directives.push(fontSrc);
-  if (imgSrc) directives.push(imgSrc);
-  if (mediaSrc) directives.push(mediaSrc);
-  if (connectSrc) directives.push(connectSrc);
-  if (frameSrc) directives.push(frameSrc);
-  if (workerSrc) directives.push(workerSrc);
-  if (baseUri) directives.push(baseUri);
-
-  return directives.join("; ");
+  return [
+    "default-src 'none'",
+    toDirective("script-src", ["'self'", "'unsafe-inline'"], resourceDomains),
+    toDirective("style-src", ["'self'", "'unsafe-inline'"], resourceDomains),
+    toDirective("font-src", ["'self'"], resourceDomains),
+    toDirective("img-src", ["'self'", "data:"], resourceDomains),
+    toDirective("media-src", ["'self'", "data:"], resourceDomains),
+    toDirective("connect-src", ["'self'"], connectDomains),
+    frameDomains.length > 0
+      ? `frame-src ${frameDomains.join(" ")}`
+      : "frame-src 'none'",
+    toDirective("worker-src", ["'self'", "blob:"], resourceDomains),
+    "object-src 'none'",
+    baseUriDomains.length > 0
+      ? `base-uri ${baseUriDomains.join(" ")}`
+      : "base-uri 'self'",
+  ].join("; ");
 }
 
-function toDirective(name: string, domains: string[] | undefined): string | null {
-  if (!domains || domains.length === 0) return null;
-  return `${name} ${domains.join(" ")}`;
+function toDirective(name: string, trustedSources: string[], domains: string[]): string {
+  return `${name} ${[...new Set([...trustedSources, ...domains])].join(" ")}`;
 }
 
-export function applyCspMeta(html: string, cspContent: string | undefined): string {
-  if (!cspContent) return html;
-  if (/http-equiv=["']Content-Security-Policy["']/i.test(html)) return html;
-  const metaTag = `<meta http-equiv="Content-Security-Policy" content="${escapeHtmlAttribute(cspContent)}">`;
-  if (/<head[^>]*>/i.test(html)) {
-    return html.replace(/<head[^>]*>/i, (match) => `${match}\n${metaTag}`);
-  }
-  return `${metaTag}\n${html}`;
+function sanitizeCspDomains(domains: unknown): string[] {
+  if (!Array.isArray(domains)) return [];
+
+  return [...new Set(domains.filter(
+    (domain): domain is string =>
+      typeof domain === "string" &&
+      domain.length > 0 &&
+      // HTTP headers must be printable ASCII; rejecting all other code points also
+      // excludes every C0/C1 control character before Node serializes the policy.
+      /^[\x21-\x7E]+$/.test(domain) &&
+      !/[;'"]/.test(domain),
+  ))];
 }
 
 function safeInlineJSON(value: unknown): string {
