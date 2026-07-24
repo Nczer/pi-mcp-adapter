@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { readdirSync, rmSync, statSync } from "node:fs";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -351,7 +352,32 @@ function truncateKey(key: string): string {
   return key.length <= KEY_MAX_CHARS ? key : `${key.slice(0, KEY_MAX_CHARS - 1)}…`;
 }
 
+const ARTIFACT_TTL_MS = 60 * 60 * 1000; // 1 hour — prune artifacts older than this
+
+function pruneOldArtifacts(): void {
+  const tmp = tmpdir();
+  let entries: string[];
+  try {
+    entries = readdirSync(tmp);
+  } catch {
+    return;
+  }
+  const now = Date.now();
+  for (const entry of entries) {
+    if (!entry.startsWith("pi-mcp-output-")) continue;
+    const fullPath = join(tmp, entry);
+    try {
+      if (now - statSync(fullPath).mtimeMs > ARTIFACT_TTL_MS) {
+        rmSync(fullPath, { recursive: true, force: true });
+      }
+    } catch {
+      // skip if can't stat or remove
+    }
+  }
+}
+
 async function saveArtifact(kind: string, text: string): Promise<{ path?: string; error?: string }> {
+  pruneOldArtifacts();
   try {
     const dir = await mkdtemp(join(tmpdir(), "pi-mcp-output-"));
     const path = join(dir, `${kind}-${randomBytes(4).toString("hex")}.txt`);
