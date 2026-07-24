@@ -719,4 +719,182 @@ describe("config discovery", () => {
     const starter = JSON.parse(readFileSync(starterPath, "utf-8"));
     expect(starter.mcpServers).toEqual({});
   });
+
+  it("imports OpenCode servers from the global V1 config", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-opencode-global-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-opencode-global-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+    writeJson(join(home, ".pi", "agent", "mcp.json"), { imports: ["opencode"], mcpServers: {} });
+    writeJson(join(home, ".config", "opencode", "opencode.json"), {
+      mcp: {
+        local: { type: "local", command: ["node", "server.js"], environment: { TOKEN: "global" }, cwd: "./servers" },
+        remote: { type: "remote", url: "https://example.test/mcp", headers: { Authorization: "Bearer global" } },
+      },
+    });
+
+    const { loadMcpConfig } = await import("../config.ts");
+    expect(loadMcpConfig().mcpServers).toEqual({
+      local: { command: "node", args: ["server.js"], env: { TOKEN: "global" }, cwd: "./servers" },
+      remote: { url: "https://example.test/mcp", headers: { Authorization: "Bearer global" } },
+    });
+  });
+
+  it("does not load OpenCode files without an explicit import", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-opencode-explicit-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-opencode-explicit-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+    writeJson(join(home, ".config", "opencode", "opencode.json"), {
+      mcp: { shouldNotLoad: { type: "local", command: ["unexpected"] } },
+    });
+
+    const { loadMcpConfig } = await import("../config.ts");
+    expect(loadMcpConfig().mcpServers).toEqual({});
+  });
+
+  it("imports OpenCode servers from the project V1 config", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-opencode-project-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-opencode-project-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+    writeJson(join(home, ".pi", "agent", "mcp.json"), { imports: ["opencode"], mcpServers: {} });
+    writeJson(join(project, "opencode.json"), {
+      mcp: { projectOnly: { type: "local", command: ["npx", "project-server"] } },
+    });
+
+    const { loadMcpConfig, findAvailableImportConfigs } = await import("../config.ts");
+    expect(loadMcpConfig().mcpServers.projectOnly).toEqual({ command: "npx", args: ["project-server"] });
+    expect(findAvailableImportConfigs()).toContainEqual({ kind: "opencode", path: resolve(realpathSync(project), "opencode.json") });
+  });
+
+  it("merges OpenCode global and project servers with nested project precedence", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-opencode-merge-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-opencode-merge-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+    writeJson(join(home, ".pi", "agent", "mcp.json"), { imports: ["opencode"], mcpServers: {} });
+    writeJson(join(home, ".config", "opencode", "opencode.json"), {
+      mcp: {
+        shared: {
+          type: "remote",
+          url: "https://global.test/mcp",
+          headers: { "X-Global": "global", "X-Shared": "global" },
+          oauth: { clientId: "global-client", scope: "global-scope" },
+        },
+        globalOnly: { type: "local", command: ["global"] },
+      },
+    });
+    writeJson(join(project, "opencode.json"), {
+      mcp: {
+        shared: {
+          headers: { "X-Project": "project", "X-Shared": "project" },
+          oauth: { scope: "project-scope", clientSecret: "project-secret" },
+        },
+        projectOnly: { type: "local", command: ["project"] },
+        oauthFalse: { type: "remote", url: "https://false.test/mcp", oauth: false },
+        oauthEmpty: { type: "remote", url: "https://empty.test/mcp", oauth: {} },
+        disabled: { type: "local", command: ["disabled"], enabled: false },
+        malformed: { type: "local", command: "not-an-array" },
+        malformedArgs: { type: "local", command: ["node", 42] },
+      },
+    });
+
+    const { loadMcpConfig, getMcpDiscoverySummary } = await import("../config.ts");
+    const config = loadMcpConfig();
+    expect(config.mcpServers).toEqual({
+      shared: {
+        url: "https://global.test/mcp",
+        headers: { "X-Global": "global", "X-Shared": "project", "X-Project": "project" },
+        auth: "oauth",
+        oauth: { clientId: "global-client", scope: "project-scope", clientSecret: "project-secret" },
+      },
+      globalOnly: { command: "global", args: [] },
+      projectOnly: { command: "project", args: [] },
+      oauthFalse: { url: "https://false.test/mcp", oauth: false },
+      oauthEmpty: { url: "https://empty.test/mcp", auth: "oauth", oauth: {} },
+    });
+    expect(getMcpDiscoverySummary().imports).toEqual([
+      expect.objectContaining({ kind: "opencode", path: resolve(realpathSync(project), "opencode.json"), serverCount: 5 }),
+    ]);
+  });
+
+  it("finds the nearest OpenCode project config from a nested Git worktree directory", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-opencode-nested-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-opencode-nested-project-"));
+    const nested = join(project, "packages", "app");
+    process.env.HOME = home;
+    mkdirSync(join(project, ".git"));
+    mkdirSync(nested, { recursive: true });
+    process.chdir(nested);
+    writeJson(join(home, ".pi", "agent", "mcp.json"), { imports: ["opencode"], mcpServers: {} });
+    writeJson(join(project, "opencode.json"), {
+      mcp: { projectRoot: { type: "local", command: ["root-server"] } },
+    });
+
+    const { loadMcpConfig, findAvailableImportConfigs } = await import("../config.ts");
+    expect(loadMcpConfig().mcpServers.projectRoot).toEqual({ command: "root-server", args: [] });
+    expect(findAvailableImportConfigs()).toContainEqual({
+      kind: "opencode",
+      path: resolve(realpathSync(project), "opencode.json"),
+    });
+  });
+
+  it("does not inherit remote credentials or local process secrets across identity changes", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-opencode-identity-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-opencode-identity-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+    writeJson(join(home, ".pi", "agent", "mcp.json"), { imports: ["opencode"], mcpServers: {} });
+    writeJson(join(home, ".config", "opencode", "opencode.json"), {
+      mcp: {
+        remote: {
+          type: "remote",
+          url: "https://trusted.test/mcp",
+          headers: { Authorization: "Bearer global-secret" },
+          oauth: { clientId: "global-client", clientSecret: "global-secret" },
+        },
+        local: {
+          type: "local",
+          command: ["trusted-server"],
+          environment: { TOKEN: "global-secret" },
+          cwd: "/trusted",
+        },
+      },
+    });
+    writeJson(join(project, "opencode.json"), {
+      mcp: {
+        remote: { url: "https://project.test/mcp" },
+        local: { command: ["project-server"] },
+      },
+    });
+
+    const { loadMcpConfig } = await import("../config.ts");
+    expect(loadMcpConfig().mcpServers).toEqual({
+      remote: { url: "https://project.test/mcp" },
+      local: { command: "project-server", args: [] },
+    });
+  });
+
+  it("reports the highest-precedence OpenCode file that parsed successfully", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-opencode-malformed-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-opencode-malformed-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+    writeJson(join(home, ".pi", "agent", "mcp.json"), { imports: ["opencode"], mcpServers: {} });
+    const globalPath = join(home, ".config", "opencode", "opencode.json");
+    writeJson(globalPath, {
+      mcp: { globalOnly: { type: "local", command: ["global"] } },
+    });
+    writeFileSync(join(project, "opencode.json"), "{ malformed", "utf-8");
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { loadMcpConfig, getMcpDiscoverySummary } = await import("../config.ts");
+    expect(loadMcpConfig().mcpServers.globalOnly).toEqual({ command: "global", args: [] });
+    expect(getMcpDiscoverySummary().imports).toEqual([
+      expect.objectContaining({ kind: "opencode", path: globalPath, serverCount: 1 }),
+    ]);
+    expect(warning).toHaveBeenCalled();
+    warning.mockRestore();
+  });
 });

@@ -35,7 +35,7 @@ import {
   type StoredTokens,
 } from "./mcp-auth.ts"
 import type { ServerEntry } from "./types.ts"
-import { formatTerminalError, interpolateEnvRecord } from "./utils.ts"
+import { formatTerminalError, interpolateEnvRecord, interpolateEnvVars } from "./utils.ts"
 import { abortable, throwIfAborted } from "./abort.ts"
 import { combineAbortSignals, isAbortError } from "./runtime-owner.ts"
 
@@ -104,14 +104,23 @@ export function extractOAuthConfig(definition: ServerEntry): McpOAuthConfig {
 
   const config: McpOAuthConfig = {}
   if (definition.oauth?.grantType !== undefined) config.grantType = definition.oauth.grantType
-  if (definition.oauth?.clientId !== undefined) config.clientId = definition.oauth.clientId
-  if (definition.oauth?.clientSecret !== undefined) config.clientSecret = definition.oauth.clientSecret
-  if (definition.oauth?.scope !== undefined) config.scope = definition.oauth.scope
+  if (definition.oauth?.clientId !== undefined) {
+    if (typeof definition.oauth.clientId !== "string") throw new Error("OAuth clientId must be a string")
+    config.clientId = interpolateEnvVars(definition.oauth.clientId)
+  }
+  if (definition.oauth?.clientSecret !== undefined) {
+    if (typeof definition.oauth.clientSecret !== "string") throw new Error("OAuth clientSecret must be a string")
+    config.clientSecret = interpolateEnvVars(definition.oauth.clientSecret)
+  }
+  if (definition.oauth?.scope !== undefined) {
+    if (typeof definition.oauth.scope !== "string") throw new Error("OAuth scope must be a string")
+    config.scope = interpolateEnvVars(definition.oauth.scope)
+  }
   if (definition.oauth?.redirectUri !== undefined) {
     if (typeof definition.oauth.redirectUri !== "string") {
       throw new Error("OAuth redirectUri must be a string")
     }
-    const redirectUri = definition.oauth.redirectUri.trim()
+    const redirectUri = interpolateEnvVars(definition.oauth.redirectUri).trim()
     if (!redirectUri) {
       throw new Error("OAuth redirectUri must not be empty")
     }
@@ -121,7 +130,7 @@ export function extractOAuthConfig(definition: ServerEntry): McpOAuthConfig {
     if (typeof definition.oauth.clientName !== "string") {
       throw new Error("OAuth clientName must be a string")
     }
-    const clientName = definition.oauth.clientName.trim()
+    const clientName = interpolateEnvVars(definition.oauth.clientName).trim()
     if (!clientName) {
       throw new Error("OAuth clientName must not be empty")
     }
@@ -131,7 +140,7 @@ export function extractOAuthConfig(definition: ServerEntry): McpOAuthConfig {
     if (typeof definition.oauth.clientUri !== "string") {
       throw new Error("OAuth clientUri must be a string")
     }
-    const clientUri = definition.oauth.clientUri.trim()
+    const clientUri = interpolateEnvVars(definition.oauth.clientUri).trim()
     if (!clientUri) {
       throw new Error("OAuth clientUri must not be empty")
     }
