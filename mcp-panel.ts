@@ -1,8 +1,10 @@
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { copyToClipboard } from "@earendil-works/pi-coding-agent";
 import { createPanelKeys, type PanelKeybindings, type PanelKeys } from "./panel-keys.ts";
 import { isToolExcluded } from "./types.ts";
 import type { McpConfig, McpPanelCallbacks, McpPanelResult, ServerProvenance, ToolPrefix } from "./types.ts";
 import { resourceNameToToolName } from "./resource-tools.ts";
+import { sanitizeTerminalText, stripOscSequences } from "./utils.ts";
 import type { MetadataCache, ServerCacheEntry, CachedTool } from "./metadata-cache.ts";
 
 interface PanelTheme {
@@ -75,25 +77,15 @@ function fuzzyScore(query: string, text: string): number {
 }
 
 function sanitizeDisplayText(text: string | null | undefined): string {
-  return (text ?? "")
-    .replace(/(?:\x1b\][\s\S]*?(?:\x07|\x1b\\)|\x9d[\s\S]*?(?:\x07|\x1b\\|\x9c))/g, "")
-    .replace(/(?:\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_])/g, "")
-    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return sanitizeTerminalText(text ?? "");
 }
 
 function sanitizeRowContent(content: string): string {
+  const withoutOsc = stripOscSequences(content);
   let result = "";
   let pendingSpace = false;
-  for (let i = 0; i < content.length; i++) {
-    const rest = content.slice(i);
-    const osc = rest.match(/^(?:\x1b\][\s\S]*?(?:\x07|\x1b\\)|\x9d[\s\S]*?(?:\x07|\x1b\\|\x9c))/);
-    if (osc) {
-      i += osc[0].length - 1;
-      continue;
-    }
-
+  for (let i = 0; i < withoutOsc.length; i++) {
+    const rest = withoutOsc.slice(i);
     const ansi = rest.match(/^(?:\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_])/);
     if (ansi) {
       result += ansi[0];
@@ -101,7 +93,7 @@ function sanitizeRowContent(content: string): string {
       continue;
     }
 
-    const code = content.charCodeAt(i);
+    const code = withoutOsc.charCodeAt(i);
     if (code <= 0x1f || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
       pendingSpace = true;
       continue;
@@ -111,7 +103,7 @@ function sanitizeRowContent(content: string): string {
       result += " ";
     }
     pendingSpace = false;
-    result += content[i];
+    result += withoutOsc[i];
   }
   return result;
 }
@@ -140,6 +132,7 @@ interface ServerState {
   excludeTools?: string[];
   exposeResources: boolean;
   connectionStatus: ConnectionStatus;
+  failureMessage?: string | null;
   tools: ToolState[];
   hasCachedData: boolean;
 }
@@ -239,6 +232,7 @@ class McpPanel {
       }
 
       const status = callbacks.getConnectionStatus(serverName);
+      const failureMessage = callbacks.getFailureMessage?.(serverName) ?? null;
 
       this.servers.push({
         name: serverName,
@@ -248,6 +242,7 @@ class McpPanel {
         excludeTools: definition.excludeTools,
         exposeResources: definition.exposeResources !== false,
         connectionStatus: status,
+        failureMessage,
         tools,
         hasCachedData: !!serverCache,
       });
@@ -457,6 +452,24 @@ class McpPanel {
       return;
     }
 
+    if (matchesKey(data, "ctrl+y")) {
+      const item = this.visibleItems[this.cursorIndex];
+      if (!item) return;
+      const server = this.servers[item.serverIndex];
+      if (server.connectionStatus !== "failed" || !server.failureMessage) return;
+      const serverName = sanitizeDisplayText(server.name);
+      const failureMessage = sanitizeDisplayText(server.failureMessage);
+      copyToClipboard(failureMessage).then(() => {
+        this.authNotice = `Copied error for ${serverName} to clipboard`;
+        this.tui.requestRender();
+      }).catch((error) => {
+        const message = sanitizeDisplayText(error instanceof Error ? error.message : String(error));
+        this.authNotice = `Failed to copy error for ${serverName}: ${message}`;
+        this.tui.requestRender();
+      });
+      return;
+    }
+
     if (data === "?") {
       if (this.authOnly) return;
       this.descSearchActive = true;
@@ -533,6 +546,7 @@ class McpPanel {
 
     this.callbacks.reconnect(server.name).then((connected) => {
       server.connectionStatus = this.callbacks.getConnectionStatus(server.name);
+      server.failureMessage = this.callbacks.getFailureMessage?.(server.name) ?? null;
       if (server.connectionStatus === "connected") {
         const entry = this.callbacks.refreshCacheAfterReconnect(server.name);
         if (entry) {
@@ -712,6 +726,11 @@ class McpPanel {
 
         if (item.type === "server") {
           lines.push(row(this.renderServerRow(server, isCursor)));
+          if (isCursor && server.connectionStatus === "failed" && server.failureMessage) {
+            for (const line of this.wrapText(sanitizeDisplayText(server.failureMessage), innerW - 6)) {
+              lines.push(row(`    ${fg(t.cancel, line)}`));
+            }
+          }
         } else if (item.toolIndex !== undefined) {
           lines.push(row(this.renderToolRow(server.tools[item.toolIndex], isCursor, innerW)));
         }
@@ -776,6 +795,7 @@ class McpPanel {
           italic("⏎") + " expand/auth",
           italic("ctrl+a") + " auth",
           italic("ctrl+r") + " reconnect",
+          ...(this.selectedServerHasFailureMessage() ? [italic("ctrl+y") + " copy error"] : []),
           italic("?") + " desc search",
           italic("ctrl+s") + " save",
           italic("esc") + " clear/close",
@@ -842,6 +862,47 @@ class McpPanel {
     }
 
     return `${prefix} ${toggleIcon} ${nameStr}${importLabel}  ${toolInfo}${statusLabel}`;
+  }
+
+  private selectedServerHasFailureMessage(): boolean {
+    const item = this.visibleItems[this.cursorIndex];
+    if (!item) return false;
+    const server = this.servers[item.serverIndex];
+    return server.connectionStatus === "failed" && !!server.failureMessage;
+  }
+
+  private wrapText(text: string, width: number): string[] {
+    const max = Math.max(8, width);
+    const words = text.split(/\s+/).filter(Boolean);
+    const lines: string[] = [];
+    let current = "";
+    const splitLongWord = (word: string): string => {
+      let rest = word;
+      while (visibleWidth(rest) > max) {
+        let take = "";
+        let index = 0;
+        while (index < rest.length && visibleWidth(take + rest[index]) <= max) {
+          take += rest[index];
+          index++;
+        }
+        if (!take) take = rest[0];
+        lines.push(take);
+        rest = rest.slice(take.length);
+      }
+      return rest;
+    };
+
+    for (const word of words) {
+      const candidate = current ? `${current} ${word}` : word;
+      if (visibleWidth(candidate) <= max) {
+        current = candidate;
+      } else {
+        if (current) lines.push(current);
+        current = splitLongWord(word);
+      }
+    }
+    if (current) lines.push(current);
+    return lines.length > 0 ? lines : [text];
   }
 
   private renderConnectionStatus(server: ServerState): string {

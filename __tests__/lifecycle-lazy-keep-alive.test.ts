@@ -17,6 +17,7 @@ class FakeManager {
   connectCalls: string[] = [];
   closeCalls: string[] = [];
   idleResponses = new Map<string, boolean>();
+  connectError: Error | undefined;
 
   setConnection(name: string, status: FakeConnection["status"] | null): void {
     if (status === null) {
@@ -32,6 +33,7 @@ class FakeManager {
 
   async connect(name: string): Promise<FakeConnection> {
     this.connectCalls.push(name);
+    if (this.connectError) throw this.connectError;
     const connection: FakeConnection = { status: "connected" };
     this.connections.set(name, connection);
     return connection;
@@ -65,6 +67,7 @@ describe("lazy-keep-alive lifecycle", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
     if (originalAgentDir === undefined) {
       delete process.env.PI_CODING_AGENT_DIR;
@@ -89,6 +92,29 @@ describe("lazy-keep-alive lifecycle", () => {
     await (lifecycle as never as { checkConnections: () => Promise<void> }).checkConnections();
 
     expect(fake.connectCalls).toContain("srv");
+  });
+
+  it("records reconnect failures and clears them after a later success", async () => {
+    const def = makeDefinition("keep-alive");
+    lifecycle.markKeepAlive("srv", def);
+    const onFailure = vi.fn();
+    const onSuccess = vi.fn();
+    lifecycle.setReconnectFailureCallback(onFailure);
+    lifecycle.setReconnectCallback(onSuccess);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    fake.connectError = new Error("server exited \x1b]52;c;clipboard-secret\x07safely");
+
+    await (lifecycle as never as { checkConnections: () => Promise<void> }).checkConnections();
+
+    expect(onFailure).toHaveBeenCalledWith("srv", fake.connectError);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(consoleError).toHaveBeenCalledWith("MCP: Failed to reconnect to srv: server exited safely");
+    expect(consoleError.mock.calls[0][0]).not.toContain("clipboard-secret");
+
+    fake.connectError = undefined;
+    await (lifecycle as never as { checkConnections: () => Promise<void> }).checkConnections();
+
+    expect(onSuccess).toHaveBeenCalledWith("srv");
   });
 
   it("does not reconnect keep-alive servers while OAuth authorization is pending", async () => {

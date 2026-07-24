@@ -2,8 +2,10 @@ import type { ServerDefinition } from "./types.ts";
 import type { McpServerManager } from "./server-manager.ts";
 import { hasPendingAuth } from "./mcp-auth-flow.ts";
 import { logger } from "./logger.ts";
+import { sanitizeTerminalText } from "./utils.ts";
 
 export type ReconnectCallback = (serverName: string) => void;
+export type ReconnectFailureCallback = (serverName: string, error: unknown) => void;
 
 export class McpLifecycleManager {
   private manager: McpServerManager;
@@ -13,6 +15,7 @@ export class McpLifecycleManager {
   private globalIdleTimeout: number = 10 * 60 * 1000;
   private healthCheckInterval?: NodeJS.Timeout;
   private onReconnect?: ReconnectCallback;
+  private onReconnectFailure?: ReconnectFailureCallback;
   private onIdleShutdown?: (serverName: string) => void;
   
   constructor(manager: McpServerManager, private readonly hasPendingAuthForServer = hasPendingAuth) {
@@ -25,6 +28,10 @@ export class McpLifecycleManager {
    */
   setReconnectCallback(callback: ReconnectCallback): void {
     this.onReconnect = callback;
+  }
+
+  setReconnectFailureCallback(callback: ReconnectFailureCallback): void {
+    this.onReconnectFailure = callback;
   }
   
   markKeepAlive(name: string, definition: ServerDefinition): void {
@@ -68,7 +75,9 @@ export class McpLifecycleManager {
           // Notify extension to update metadata
           this.onReconnect?.(name);
         } catch (error) {
-          console.error(`MCP: Failed to reconnect to ${name}:`, error);
+          this.onReconnectFailure?.(name, error);
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(`MCP: Failed to reconnect to ${name}: ${sanitizeTerminalText(message)}`);
         }
       }
     }

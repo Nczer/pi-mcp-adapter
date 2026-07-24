@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import type { McpExtensionState } from "./state.ts";
 import type { ToolMetadata, McpContent } from "./types.ts";
 import { getServerPrefix, parseUiPromptHandoff } from "./types.ts";
-import { lazyConnect, markKeepAliveAfterConnect, updateServerMetadata, updateMetadataCache, getFailureAgeSeconds, updateStatusBar } from "./init.ts";
+import { lazyConnect, markKeepAliveAfterConnect, updateServerMetadata, updateMetadataCache, getFailureAgeSeconds, updateStatusBar, clearFailure, recordFailure } from "./init.ts";
 import { abortable, throwIfAborted } from "./abort.ts";
 import { buildToolMetadata, getToolNames, findToolByName, formatSchema } from "./tool-metadata.ts";
 import { resolveMcpResultContent, transformMcpContent } from "./tool-registrar.ts";
@@ -325,7 +325,7 @@ export async function executeAuthComplete(state: McpExtensionState, serverName: 
     }
 
     await state.manager.close(serverName);
-    state.failureTracker.delete(serverName);
+    clearFailure(state, serverName);
     updateStatusBar(state);
     return {
       content: [{ type: "text" as const, text: `OAuth authentication successful for "${serverName}". Run mcp({ connect: "${serverName}" }) to connect with the new token.` }],
@@ -635,15 +635,13 @@ export async function executeConnect(state: McpExtensionState, serverName: strin
     }
     updateMetadataCache(state, serverName);
     markKeepAliveAfterConnect(state, serverName);
-    state.failureTracker.delete(serverName);
+    clearFailure(state, serverName);
     updateStatusBar(state);
     return executeList(state, serverName);
   } catch (error) {
-    if (!signal?.aborted) {
-      state.failureTracker.set(serverName, Date.now());
-    }
-    updateStatusBar(state);
     const message = error instanceof Error ? error.message : String(error);
+    if (!signal?.aborted) recordFailure(state, serverName, message);
+    updateStatusBar(state);
     return {
       content: [{ type: "text" as const, text: `Failed to connect to "${serverName}": ${message}` }],
       details: { mode: "connect", error: signal?.aborted ? "aborted" : "connect_failed", server: serverName, message },
@@ -703,7 +701,7 @@ export async function executeCall(
           }
           if (autoAuth.status === "success") {
             await state.manager.close(serverName);
-            state.failureTracker.delete(serverName);
+            clearFailure(state, serverName);
             const connectedAfterAuth = await lazyConnect(state, serverName, signal);
             if (connectedAfterAuth) {
               toolMeta = findToolByName(state.toolMetadata.get(serverName), toolName);
@@ -763,7 +761,7 @@ export async function executeCall(
         }
         if (autoAuth.status === "success") {
           await state.manager.close(configuredServer);
-          state.failureTracker.delete(configuredServer);
+          clearFailure(state, configuredServer);
           connected = await lazyConnect(state, configuredServer, signal);
         }
       }
@@ -816,7 +814,7 @@ export async function executeCall(
       }
       if (autoAuth.status === "success") {
         await state.manager.close(serverName);
-        state.failureTracker.delete(serverName);
+        clearFailure(state, serverName);
         connection = state.manager.getConnection(serverName);
       }
     }
@@ -875,7 +873,7 @@ export async function executeCall(
           };
         }
       }
-      state.failureTracker.delete(serverName);
+      clearFailure(state, serverName);
       updateServerMetadata(state, serverName);
       updateMetadataCache(state, serverName);
       markKeepAliveAfterConnect(state, serverName);
@@ -892,11 +890,9 @@ export async function executeCall(
         };
       }
     } catch (error) {
-      if (!signal?.aborted) {
-        state.failureTracker.set(serverName, Date.now());
-      }
-      updateStatusBar(state);
       const message = error instanceof Error ? error.message : String(error);
+      if (!signal?.aborted) recordFailure(state, serverName, message);
+      updateStatusBar(state);
       return {
         content: [{ type: "text" as const, text: `Failed to connect to "${serverName}": ${message}` }],
         details: { mode: "call", error: signal?.aborted ? "aborted" : "connect_failed", message },
@@ -926,7 +922,7 @@ export async function executeCall(
         if (afterAuth?.status === "needs-auth") {
           await state.manager.close(serverName);
         }
-        state.failureTracker.delete(serverName);
+        clearFailure(state, serverName);
         connection = await state.manager.connect(serverName, definition, signal);
         return connection;
       }

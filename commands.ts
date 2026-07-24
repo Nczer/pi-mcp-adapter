@@ -12,13 +12,13 @@ import {
   writeSharedServerEntry,
   writeStarterProjectConfig,
 } from "./config.ts";
-import { markKeepAliveAfterConnect, updateMetadataCache, updateStatusBar, getFailureAgeSeconds } from "./init.ts";
+import { markKeepAliveAfterConnect, updateMetadataCache, updateStatusBar, getFailureAgeSeconds, getFailureMessage, clearFailure, recordFailure } from "./init.ts";
 import { loadMetadataCache } from "./metadata-cache.ts";
 import { buildToolMetadata } from "./tool-metadata.ts";
 import { supportsOAuth, authenticate, removeAuth } from "./mcp-auth-flow.ts";
 import { getAuthForUrl, getAuthStorageOptions } from "./mcp-auth.ts";
 import { loadOnboardingState, markSetupCompleted as persistSetupCompleted, markSharedConfigHintShown } from "./onboarding-state.ts";
-import { openPath, resolveServerUrl } from "./utils.ts";
+import { openPath, resolveServerUrl, sanitizeTerminalText } from "./utils.ts";
 
 export async function showStatus(state: McpExtensionState, ctx: ExtensionContext): Promise<void> {
   if (!ctx.hasUI) return;
@@ -41,7 +41,8 @@ export async function showStatus(state: McpExtensionState, ctx: ExtensionContext
       status = "needs auth";
       statusIcon = "⚠";
     } else if (failedAgo !== null) {
-      status = `failed ${failedAgo}s ago`;
+      const reason = sanitizeTerminalText(getFailureMessage(state, name) ?? "");
+      status = reason ? `failed ${failedAgo}s ago — ${reason}` : `failed ${failedAgo}s ago`;
       statusIcon = "✗";
       failed = true;
     } else if (metadata !== undefined) {
@@ -115,7 +116,7 @@ export async function reconnectServer(
     }
     updateMetadataCache(state, name);
     markKeepAliveAfterConnect(state, name);
-    state.failureTracker.delete(name);
+    clearFailure(state, name);
 
     if (ctx.hasUI) {
       ctx.ui.notify(
@@ -130,9 +131,9 @@ export async function reconnectServer(
     return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    state.failureTracker.set(name, Date.now());
+    recordFailure(state, name, message);
     if (ctx.hasUI) {
-      ctx.ui.notify(`MCP: Failed to reconnect to ${name}: ${message}`, "error");
+      ctx.ui.notify(`MCP: Failed to reconnect to ${name}: ${sanitizeTerminalText(message)}`, "error");
     }
     updateStatusBar(state);
     return false;
@@ -364,6 +365,7 @@ function buildMcpPanelCallbacks(
       if (getFailureAgeSeconds(state, serverName) !== null) return "failed";
       return "idle";
     },
+    getFailureMessage: (serverName: string) => getFailureMessage(state, serverName),
     refreshCacheAfterReconnect: (serverName: string) => {
       const freshCache = loadMetadataCache();
       return freshCache?.servers?.[serverName] ?? null;

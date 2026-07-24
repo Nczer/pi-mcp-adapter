@@ -31,6 +31,36 @@ import {
 import { interpolateEnvRecord, resolveBearerToken, resolveConfigPath, resolveServerUrl } from "./utils.ts";
 import { abortable, throwIfAborted } from "./abort.ts";
 
+const MAX_CAPTURED_STDERR_BYTES = 8 * 1024;
+const MAX_CAPTURED_STDERR_LINES = 3;
+
+function boundedStderrChunk(chunk: Buffer | string): Buffer {
+  if (Buffer.isBuffer(chunk)) {
+    const start = Math.max(0, chunk.byteLength - MAX_CAPTURED_STDERR_BYTES);
+    return Buffer.from(chunk.subarray(start));
+  }
+
+  // Limit string conversion before encoding; Buffer.from(largeString) would
+  // otherwise allocate the entire stderr event before applying the cap.
+  const suffix = chunk.length > MAX_CAPTURED_STDERR_BYTES
+    ? chunk.slice(-MAX_CAPTURED_STDERR_BYTES)
+    : chunk;
+  const bytes = Buffer.from(suffix, "utf8");
+  return bytes.byteLength > MAX_CAPTURED_STDERR_BYTES
+    ? Buffer.from(bytes.subarray(bytes.byteLength - MAX_CAPTURED_STDERR_BYTES))
+    : bytes;
+}
+
+function appendStderrTail(tail: Buffer, chunk: Buffer | string): Buffer {
+  const bytes = boundedStderrChunk(chunk);
+  if (bytes.length === 0) return tail;
+  if (tail.length === 0) return bytes;
+  const combined = Buffer.concat([tail, bytes]);
+  return combined.length > MAX_CAPTURED_STDERR_BYTES
+    ? Buffer.from(combined.subarray(combined.length - MAX_CAPTURED_STDERR_BYTES))
+    : combined;
+}
+
 export interface ServerConnection {
   client: Client;
   transport: Transport;
@@ -189,6 +219,7 @@ export class McpServerManager {
     const client = this.createClient(name);
 
     let transport: Transport;
+    let stderrTail: Buffer<ArrayBufferLike> = Buffer.alloc(0);
 
     if (definition.command) {
       let command = definition.command;
@@ -203,13 +234,21 @@ export class McpServerManager {
         }
       }
 
-      transport = new StdioClientTransport({
+      const stdioTransport = new StdioClientTransport({
         command,
         args,
         env: resolveEnv(definition.env),
         cwd: resolveConfigPath(definition.cwd) ?? this.defaultCwd,
-        stderr: definition.debug ? "inherit" : "ignore",
+        stderr: definition.debug ? "inherit" : "pipe",
       });
+      // Keep non-debug child diagnostics available for connection failures without
+      // retaining an unbounded stream or changing the existing debug behavior.
+      if (stdioTransport.stderr) {
+        stdioTransport.stderr.on("data", (chunk: Buffer | string) => {
+          stderrTail = appendStderrTail(stderrTail, chunk);
+        });
+      }
+      transport = stdioTransport;
     } else if (definition.url) {
       // HTTP transport with fallback
       transport = await this.createHttpTransport(definition, name, signal);
@@ -282,6 +321,16 @@ export class McpServerManager {
       // Clean up both client and transport on any error
       await client.close().catch(() => {});
       await transport.close().catch(() => {});
+
+      if (stderrTail.length > 0) {
+        const stderrText = stderrTail.toString("utf8").trim();
+        const lines = stderrText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+        if (lines.length > 0) {
+          const baseMessage = error instanceof Error ? error.message : String(error);
+          const detail = lines.slice(-MAX_CAPTURED_STDERR_LINES).join(" — ");
+          throw new Error(`${baseMessage} (${detail})`, { cause: error });
+        }
+      }
       throw error;
     }
   }

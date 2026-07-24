@@ -98,6 +98,7 @@ describe("lazy-keep-alive initializeMcp integration", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     if (originalDirectTools === undefined) {
       delete process.env.MCP_DIRECT_TOOLS;
     } else {
@@ -121,6 +122,104 @@ describe("lazy-keep-alive initializeMcp integration", () => {
     await (state.lifecycle as any).checkConnections();
 
     expect(mocks.manager.connect).toHaveBeenCalledTimes(2);
+  });
+
+  it("records direct-tool bootstrap failures", async () => {
+    mkdirSync(tempDir, { recursive: true });
+    writeFileSync(mocks.cachePath, JSON.stringify({ version: 1, servers: {} }));
+    mocks.config = {
+      settings: {},
+      mcpServers: { srv: { command: "demo", lifecycle: "lazy", directTools: true } },
+    };
+    mocks.getMissingConfiguredDirectToolServers.mockReturnValue(["srv"]);
+    mocks.manager.connect.mockRejectedValueOnce(new Error("bootstrap failed"));
+    const { initializeMcp } = await import("../init.ts");
+
+    const state = await initializeMcp({ getFlag: vi.fn(() => undefined) } as any, {
+      cwd: tempDir,
+      hasUI: false,
+      mode: "headless",
+      signal: undefined,
+    } as any);
+
+    expect(state.failureTracker.has("srv")).toBe(true);
+    expect(state.failureMessages.get("srv")).toBe("bootstrap failed");
+  });
+
+  it("clears stale startup diagnostics when direct-tool bootstrap recovers", async () => {
+    mkdirSync(tempDir, { recursive: true });
+    writeFileSync(mocks.cachePath, JSON.stringify({ version: 1, servers: {} }));
+    mocks.config = {
+      settings: {},
+      mcpServers: { srv: { command: "demo", lifecycle: "keep-alive", directTools: true } },
+    };
+    mocks.getMissingConfiguredDirectToolServers.mockReturnValue(["srv"]);
+    mocks.manager.connect.mockRejectedValueOnce(new Error("startup failed"));
+    const { initializeMcp } = await import("../init.ts");
+
+    const state = await initializeMcp({ getFlag: vi.fn(() => undefined) } as any, {
+      cwd: tempDir,
+      hasUI: false,
+      mode: "headless",
+      signal: undefined,
+    } as any);
+
+    expect(mocks.manager.connect).toHaveBeenCalledTimes(2);
+    expect(state.failureTracker.has("srv")).toBe(false);
+    expect(state.failureMessages.has("srv")).toBe(false);
+  });
+
+  it("sanitizes captured diagnostics in startup notifications and terminal logs", async () => {
+    mkdirSync(tempDir, { recursive: true });
+    writeFileSync(mocks.cachePath, JSON.stringify({ version: 1, servers: {} }));
+    mocks.config = {
+      settings: {},
+      mcpServers: { srv: { command: "demo", lifecycle: "eager" } },
+    };
+    mocks.manager.connect.mockRejectedValueOnce(new Error("stderr \x1b]52;c;clipboard-secret\x07startup failed"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { initializeMcp } = await import("../init.ts");
+    const ui = { setStatus: vi.fn(), notify: vi.fn() };
+
+    const state = await initializeMcp({ getFlag: vi.fn(() => undefined) } as any, {
+      cwd: tempDir,
+      hasUI: true,
+      mode: "tui",
+      ui,
+      signal: undefined,
+    } as any);
+
+    expect(state.failureMessages.get("srv")).toContain("clipboard-secret");
+    expect(ui.notify).toHaveBeenCalledWith("MCP: Failed to connect to srv: stderr startup failed", "error");
+    expect(consoleError).toHaveBeenCalledWith("MCP: Failed to connect to srv: stderr startup failed");
+  });
+
+  it("does not record or notify an aborted eager startup", async () => {
+    mkdirSync(tempDir, { recursive: true });
+    writeFileSync(mocks.cachePath, JSON.stringify({ version: 1, servers: {} }));
+    mocks.config = {
+      settings: {},
+      mcpServers: { srv: { command: "demo", lifecycle: "eager" } },
+    };
+    const controller = new AbortController();
+    mocks.manager.connect.mockImplementationOnce(async () => {
+      controller.abort(new Error("startup cancelled"));
+      throw new Error("startup cancelled");
+    });
+    const { initializeMcp } = await import("../init.ts");
+    const ui = { setStatus: vi.fn(), notify: vi.fn() };
+
+    const state = await initializeMcp({ getFlag: vi.fn(() => undefined) } as any, {
+      cwd: tempDir,
+      hasUI: true,
+      mode: "tui",
+      ui,
+      signal: controller.signal,
+    } as any);
+
+    expect(state.failureTracker.size).toBe(0);
+    expect(state.failureMessages.size).toBe(0);
+    expect(ui.notify).not.toHaveBeenCalledWith(expect.stringContaining("Failed to connect"), "error");
   });
 
   it("marks direct-tool metadata bootstrap spawns for health-check reconnects", async () => {

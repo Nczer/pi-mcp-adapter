@@ -19,13 +19,49 @@ import {
 import { McpServerManager } from "./server-manager.ts";
 import { buildToolMetadata, totalToolCount } from "./tool-metadata.ts";
 import { UiResourceHandler } from "./ui-resource-handler.ts";
-import { openUrl, parallelLimit } from "./utils.ts";
+import { openUrl, parallelLimit, sanitizeTerminalText } from "./utils.ts";
 import { logger } from "./logger.ts";
 import { getMissingConfiguredDirectToolServers } from "./direct-tools.ts";
 import { throwIfAborted } from "./abort.ts";
 import { getAuthStorageOptions } from "./mcp-auth.ts";
 
 const FAILURE_BACKOFF_MS = 60 * 1000;
+const MAX_FAILURE_MESSAGE_CHARS = 8 * 1024;
+const failureExpiryTimers = new WeakMap<McpExtensionState, Map<string, ReturnType<typeof setTimeout>>>();
+
+function getFailureExpiryTimers(state: McpExtensionState): Map<string, ReturnType<typeof setTimeout>> {
+  let timers = failureExpiryTimers.get(state);
+  if (!timers) {
+    timers = new Map();
+    failureExpiryTimers.set(state, timers);
+  }
+  return timers;
+}
+
+export function clearFailure(state: McpExtensionState, serverName: string): void {
+  state.failureTracker.delete(serverName);
+  state.failureMessages?.delete(serverName);
+  const timers = failureExpiryTimers.get(state);
+  const timer = timers?.get(serverName);
+  if (timer) clearTimeout(timer);
+  timers?.delete(serverName);
+}
+
+export function recordFailure(state: McpExtensionState, serverName: string, message: string): void {
+  clearFailure(state, serverName);
+  const failedAt = Date.now();
+  state.failureTracker.set(serverName, failedAt);
+  state.failureMessages?.set(serverName, message.slice(0, MAX_FAILURE_MESSAGE_CHARS));
+  const timer = setTimeout(() => {
+    if (state.failureTracker.get(serverName) === failedAt) {
+      state.failureTracker.delete(serverName);
+      state.failureMessages?.delete(serverName);
+    }
+    getFailureExpiryTimers(state).delete(serverName);
+  }, FAILURE_BACKOFF_MS);
+  timer.unref?.();
+  getFailureExpiryTimers(state).set(serverName, timer);
+}
 
 export function isTuiMode(ctx: Pick<ExtensionContext, "hasUI" | "mode">): boolean {
   return ctx.hasUI && ctx.mode === "tui";
@@ -63,6 +99,7 @@ export async function initializeMcp(
   const toolMetadata = new Map<string, ToolMetadata[]>();
   const serverInstructions = new Map<string, string>();
   const failureTracker = new Map<string, number>();
+  const failureMessages = new Map<string, string>();
   const uiResourceHandler = new UiResourceHandler(manager, config);
   const consentManager = new ConsentManager("once-per-server");
   const ui = ctx.hasUI ? ctx.ui : undefined;
@@ -74,6 +111,7 @@ export async function initializeMcp(
     config,
     authStorageOptions,
     failureTracker,
+    failureMessages,
     uiResourceHandler,
     consentManager,
     uiServer: null,
@@ -148,6 +186,9 @@ export async function initializeMcp(
       }
       return { name, definition, connection, error: null };
     } catch (error) {
+      if (ctx.signal?.aborted) {
+        return { name, definition, connection: null, error: null };
+      }
       const message = error instanceof Error ? error.message : String(error);
       return { name, definition, connection: null, error: message };
     }
@@ -167,10 +208,13 @@ export async function initializeMcp(
 
   for (const { name, definition, connection, error } of results) {
     if (error || !connection) {
+      if (ctx.signal?.aborted) continue;
+      if (error) recordFailure(state, name, error);
+      const displayError = sanitizeTerminalText(error ?? "Unknown connection failure");
       if (ctx.hasUI) {
-        ctx.ui.notify(`MCP: Failed to connect to ${name}: ${error}`, "error");
+        ctx.ui.notify(`MCP: Failed to connect to ${name}: ${displayError}`, "error");
       }
-      console.error(`MCP: Failed to connect to ${name}: ${error}`);
+      console.error(`MCP: Failed to connect to ${name}: ${displayError}`);
       continue;
     }
 
@@ -221,10 +265,13 @@ export async function initializeMcp(
             updateServerMetadata(state, name);
             updateMetadataCache(state, name);
             markKeepAliveAfterConnect(state, name);
+            clearFailure(state, name);
             return { name, ok: true };
           } catch (error) {
+            if (ctx.signal?.aborted) return { name, ok: false };
             const message = error instanceof Error ? error.message : String(error);
-            logger.debug(`MCP: direct-tools bootstrap failed for ${name}: ${message}`);
+            recordFailure(state, name, message);
+            logger.debug(`MCP: direct-tools bootstrap failed for ${name}: ${sanitizeTerminalText(message)}`);
             return { name, ok: false };
           }
         },
@@ -239,7 +286,13 @@ export async function initializeMcp(
   lifecycle.setReconnectCallback((serverName) => {
     updateServerMetadata(state, serverName);
     updateMetadataCache(state, serverName);
-    state.failureTracker.delete(serverName);
+    clearFailure(state, serverName);
+    updateStatusBar(state);
+  });
+
+  lifecycle.setReconnectFailureCallback((serverName, error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    recordFailure(state, serverName, message);
     updateStatusBar(state);
   });
 
@@ -342,6 +395,11 @@ export function getFailureAgeSeconds(state: McpExtensionState, serverName: strin
   return Math.round(ageMs / 1000);
 }
 
+export function getFailureMessage(state: McpExtensionState, serverName: string): string | null {
+  if (getFailureAgeSeconds(state, serverName) === null) return null;
+  return state.failureMessages?.get(serverName) ?? null;
+}
+
 export async function lazyConnect(state: McpExtensionState, serverName: string, signal?: AbortSignal): Promise<boolean> {
   const connection = state.manager.getConnection(serverName);
   if (connection?.status === "needs-auth") {
@@ -367,7 +425,7 @@ export async function lazyConnect(state: McpExtensionState, serverName: string, 
     if (newConnection.status === "needs-auth") {
       return false;
     }
-    state.failureTracker.delete(serverName);
+    clearFailure(state, serverName);
     updateServerMetadata(state, serverName);
     updateMetadataCache(state, serverName);
     markKeepAliveAfterConnect(state, serverName);
@@ -377,9 +435,9 @@ export async function lazyConnect(state: McpExtensionState, serverName: string, 
     if (signal?.aborted) {
       throwIfAborted(signal);
     }
-    state.failureTracker.set(serverName, Date.now());
     const message = error instanceof Error ? error.message : String(error);
-    logger.debug(`MCP: lazy connect failed for ${serverName}: ${message}`);
+    recordFailure(state, serverName, message);
+    logger.debug(`MCP: lazy connect failed for ${serverName}: ${sanitizeTerminalText(message)}`);
     updateStatusBar(state);
     return false;
   }
