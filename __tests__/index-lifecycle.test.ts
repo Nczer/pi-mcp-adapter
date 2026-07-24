@@ -473,6 +473,49 @@ describe("mcpAdapter session lifecycle", () => {
     expect(mocks.shutdownOAuth).toHaveBeenCalledTimes(1);
   });
 
+  it("completes current `/mcp` subcommands and server arguments", async () => {
+    const state = createState();
+    state.config.mcpServers = {
+      github: { command: "github-mcp" },
+      gitlab: { command: "gitlab-mcp" },
+      notion: { command: "notion-mcp" },
+    };
+    mocks.initializeMcp.mockResolvedValue(state);
+
+    const { default: mcpAdapter } = await import("../index.ts");
+    const { api, handlers } = createPi();
+    mcpAdapter(api);
+
+    const commandDef = api.registerCommand.mock.calls.find((call: any[]) => call[0] === "mcp")?.[1];
+    expect(commandDef.getArgumentCompletions("reconnect ")).toBeNull();
+
+    await handlers.get("session_start")?.({}, { hasUI: false });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(commandDef.getArgumentCompletions("").map(({ value }: { value: string }) => value)).toEqual([
+      "reconnect",
+      "tools",
+      "setup",
+      "logout",
+      "status",
+    ]);
+    expect(commandDef.getArgumentCompletions("st")).toEqual([
+      { value: "status", label: "status — Show server status" },
+    ]);
+    expect(commandDef.getArgumentCompletions("reconnect ")).toEqual([
+      { value: "reconnect github", label: "github" },
+      { value: "reconnect gitlab", label: "gitlab" },
+      { value: "reconnect notion", label: "notion" },
+    ]);
+    expect(commandDef.getArgumentCompletions("  logout git")).toEqual([
+      { value: "logout github", label: "github" },
+      { value: "logout gitlab", label: "gitlab" },
+    ]);
+    expect(commandDef.getArgumentCompletions("tools anything")).toBeNull();
+    expect(api.registerCommand.mock.calls.some((call: any[]) => call[0] === "mcp-reconnect")).toBe(false);
+  });
+
   it("routes `/mcp setup` to the onboarding flow", async () => {
     const state = createState();
     mocks.initializeMcp.mockResolvedValue(state);
