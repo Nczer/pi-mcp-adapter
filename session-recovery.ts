@@ -15,20 +15,23 @@
 // the original request.
 //
 // This module intentionally does NOT:
-//   - match on error message text
-//   - match on any other HTTP status (in particular 400, which is ambiguous
-//     and can mean many things other than "your session is gone")
+//   - match broad error messages without a prior session id
+//   - match generic HTTP 400 responses, which are ambiguous and can mean
+//     many things other than "your session is gone"
+//   - treat generic -32000/ConnectionClosed errors as session expiry
 //   - treat AbortError/cancellation as a session failure
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { logger } from "./logger.ts";
 import { throwIfAborted } from "./abort.ts";
 import type { McpConfig } from "./types.ts";
 import type { McpServerManager, ServerConnection } from "./server-manager.ts";
 
 /**
- * True when `err` is the MCP spec's exact definition of "this Streamable
- * HTTP session no longer exists on the server": a 404 `StreamableHTTPError`
- * for a request that was sent while carrying an `Mcp-Session-Id`.
+ * True when `err` is a stale Streamable HTTP session signal for a request
+ * sent while carrying an `Mcp-Session-Id`: the spec's 404 transport
+ * response, or the narrowly-known `-32000 Server not initialized` protocol
+ * gate response some servers emit before dispatching to a handler.
  *
  * `hadSessionId` must reflect the transport's session id from *before* the
  * call that produced `err` was made. The installed SDK (1.29.0) happens not
@@ -36,8 +39,22 @@ import type { McpServerManager, ServerConnection } from "./server-manager.ts";
  * time currently agrees with checking it up front — but callers should
  * capture it before the call rather than rely on that incidental behavior.
  */
+const SERVER_NOT_INITIALIZED_MCP_MESSAGES = new Set([
+  `MCP error ${ErrorCode.ConnectionClosed}: Server not initialized`,
+  `MCP error ${ErrorCode.ConnectionClosed}: Bad Request: Server not initialized`,
+]);
+
 export function isTerminatedSession(err: unknown, hadSessionId: boolean): boolean {
-  return err instanceof StreamableHTTPError && err.code === 404 && hadSessionId;
+  if (!hadSessionId) return false;
+  if (err instanceof StreamableHTTPError) {
+    return err.code === 404
+      || (err.code === 400
+        && /"code"\s*:\s*-32000/.test(err.message)
+        && /"message"\s*:\s*"Bad Request: Server not initialized"/.test(err.message));
+  }
+  return err instanceof McpError
+    && err.code === ErrorCode.ConnectionClosed
+    && SERVER_NOT_INITIALIZED_MCP_MESSAGES.has(err.message);
 }
 
 function hasSessionId(connection: ServerConnection): boolean {
@@ -102,7 +119,7 @@ export async function withSessionRecovery<T>(
     }
 
     throwIfAborted(deps.signal);
-    logger.debug(`MCP session for "${serverName}" expired (404 + Mcp-Session-Id); reconnecting`, {
+    logger.debug(`MCP session for "${serverName}" expired; reconnecting`, {
       server: serverName,
     });
     let freshConnection = deps.signal
