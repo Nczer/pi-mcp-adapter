@@ -6,6 +6,7 @@ import type { ToolMetadata, McpContent } from "./types.ts";
 import { getServerPrefix, parseUiPromptHandoff } from "./types.ts";
 import { lazyConnect, markKeepAliveAfterConnect, updateServerMetadata, updateMetadataCache, getFailureAgeSeconds, updateStatusBar, clearFailure, recordFailure } from "./init.ts";
 import { abortable, throwIfAborted } from "./abort.ts";
+import { combineAbortSignals, isAbortError } from "./runtime-owner.ts";
 import { buildToolMetadata, getToolNames, findToolByName, formatSchema } from "./tool-metadata.ts";
 import { resolveMcpResultContent, transformMcpContent } from "./tool-registrar.ts";
 import { guardMcpOutput, guardedMcpDetails, resolveMcpOutputGuardOptions } from "./mcp-output-guard.ts";
@@ -81,6 +82,7 @@ function formatManualAuthInstructions(serverName: string, authorizationUrl: stri
 async function attemptAutoAuth(
   state: McpExtensionState,
   serverName: string,
+  signal?: AbortSignal,
 ): Promise<AutoAuthResult> {
   if (state.config.settings?.autoAuth !== true) {
     return { status: "skipped" };
@@ -116,12 +118,22 @@ async function attemptAutoAuth(
 
   try {
     if (state.authStorageOptions) {
-      await authenticate(serverName, serverUrl, definition, { authStorageOptions: state.authStorageOptions });
+      await authenticate(
+        serverName,
+        serverUrl,
+        definition,
+        signal ? { authStorageOptions: state.authStorageOptions, signal } : { authStorageOptions: state.authStorageOptions },
+      );
     } else {
-      await authenticate(serverName, serverUrl, definition);
+      if (signal) {
+        await authenticate(serverName, serverUrl, definition, { signal });
+      } else {
+        await authenticate(serverName, serverUrl, definition);
+      }
     }
     return { status: "success" };
   } catch (error) {
+    if (isAbortError(error, signal)) throw error;
     const message = error instanceof Error ? error.message : String(error);
     return {
       status: "failed",
@@ -264,7 +276,9 @@ export function executeStatus(state: McpExtensionState): ProxyToolResult {
   };
 }
 
-export async function executeAuthStart(state: McpExtensionState, serverName: string): Promise<ProxyToolResult> {
+export async function executeAuthStart(state: McpExtensionState, serverName: string, signal?: AbortSignal): Promise<ProxyToolResult> {
+  const ownedSignal = combineAbortSignals(state.owner?.signal, signal);
+  throwIfAborted(ownedSignal);
   const definition = state.config.mcpServers[serverName];
   if (!definition) {
     return {
@@ -283,8 +297,12 @@ export async function executeAuthStart(state: McpExtensionState, serverName: str
     }
 
     const { authorizationUrl } = state.authStorageOptions
-      ? await startAuth(serverName, serverUrl, definition, { authStorageOptions: state.authStorageOptions })
-      : await startAuth(serverName, serverUrl, definition);
+      ? ownedSignal
+        ? await startAuth(serverName, serverUrl, definition, { authStorageOptions: state.authStorageOptions, signal: ownedSignal })
+        : await startAuth(serverName, serverUrl, definition, { authStorageOptions: state.authStorageOptions })
+      : ownedSignal
+        ? await startAuth(serverName, serverUrl, definition, { signal: ownedSignal })
+        : await startAuth(serverName, serverUrl, definition);
     if (!authorizationUrl) {
       return {
         content: [{ type: "text" as const, text: `OAuth authentication successful for "${serverName}".` }],
@@ -305,7 +323,9 @@ export async function executeAuthStart(state: McpExtensionState, serverName: str
   }
 }
 
-export async function executeAuthComplete(state: McpExtensionState, serverName: string, input: string): Promise<ProxyToolResult> {
+export async function executeAuthComplete(state: McpExtensionState, serverName: string, input: string, signal?: AbortSignal): Promise<ProxyToolResult> {
+  const ownedSignal = combineAbortSignals(state.owner?.signal, signal);
+  throwIfAborted(ownedSignal);
   if (!state.config.mcpServers[serverName]) {
     return {
       content: [{ type: "text" as const, text: `Server "${serverName}" not found. Use mcp({}) to see available servers.` }],
@@ -315,8 +335,12 @@ export async function executeAuthComplete(state: McpExtensionState, serverName: 
 
   try {
     const status = state.authStorageOptions
-      ? await completeAuthFromInput(serverName, input, { authStorageOptions: state.authStorageOptions })
-      : await completeAuthFromInput(serverName, input);
+      ? ownedSignal
+        ? await completeAuthFromInput(serverName, input, { authStorageOptions: state.authStorageOptions, signal: ownedSignal })
+        : await completeAuthFromInput(serverName, input, { authStorageOptions: state.authStorageOptions })
+      : ownedSignal
+        ? await completeAuthFromInput(serverName, input, { signal: ownedSignal })
+        : await completeAuthFromInput(serverName, input);
     if (status !== "authenticated") {
       return {
         content: [{ type: "text" as const, text: `OAuth authentication did not complete for "${serverName}".` }],
@@ -591,7 +615,8 @@ export function executeInstructions(state: McpExtensionState, server: string): P
 }
 
 export async function executeConnect(state: McpExtensionState, serverName: string, signal?: AbortSignal): Promise<ProxyToolResult> {
-  throwIfAborted(signal);
+  const ownedSignal = combineAbortSignals(state.owner?.signal, signal);
+  throwIfAborted(ownedSignal);
   const definition = state.config.mcpServers[serverName];
   if (!definition) {
     return {
@@ -604,9 +629,11 @@ export async function executeConnect(state: McpExtensionState, serverName: strin
     if (state.ui) {
       state.ui.setStatus("mcp", `MCP: connecting to ${serverName}...`);
     }
-    let connection = await state.manager.connect(serverName, definition, signal);
+    let connection = ownedSignal
+      ? await state.manager.connect(serverName, definition, ownedSignal)
+      : await state.manager.connect(serverName, definition);
     if (connection.status === "needs-auth") {
-      const autoAuth = await attemptAutoAuth(state, serverName);
+      const autoAuth = await attemptAutoAuth(state, serverName, ownedSignal);
       if (autoAuth.status === "failed") {
         return {
           content: [{ type: "text" as const, text: autoAuth.message }],
@@ -615,7 +642,10 @@ export async function executeConnect(state: McpExtensionState, serverName: strin
       }
       if (autoAuth.status === "success") {
         await state.manager.close(serverName);
-        connection = await state.manager.connect(serverName, definition, signal);
+        throwIfAborted(ownedSignal);
+        connection = ownedSignal
+          ? await state.manager.connect(serverName, definition, ownedSignal)
+          : await state.manager.connect(serverName, definition);
       }
       if (connection.status === "needs-auth") {
         const message = getAuthRequiredMessage(state, serverName);
@@ -640,11 +670,11 @@ export async function executeConnect(state: McpExtensionState, serverName: strin
     return executeList(state, serverName);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (!signal?.aborted) recordFailure(state, serverName, message);
+    if (!isAbortError(error, ownedSignal)) recordFailure(state, serverName, message);
     updateStatusBar(state);
     return {
       content: [{ type: "text" as const, text: `Failed to connect to "${serverName}": ${message}` }],
-      details: { mode: "connect", error: signal?.aborted ? "aborted" : "connect_failed", server: serverName, message },
+      details: { mode: "connect", error: isAbortError(error, ownedSignal) ? "aborted" : "connect_failed", server: serverName, message },
     };
   }
 }
@@ -657,7 +687,8 @@ export async function executeCall(
   getPiTools?: () => ToolInfo[],
   signal?: AbortSignal,
 ): Promise<ProxyToolResult> {
-  throwIfAborted(signal);
+  const ownedSignal = combineAbortSignals(state.owner?.signal, signal);
+  throwIfAborted(ownedSignal);
   let serverName: string | undefined = serverOverride;
   let toolMeta: ToolMetadata | undefined;
   let autoAuthAttempted = false;
@@ -684,7 +715,7 @@ export async function executeCall(
   }
 
   if (serverName && !toolMeta) {
-    const connected = await lazyConnect(state, serverName, signal);
+    const connected = await lazyConnect(state, serverName, ownedSignal);
     if (connected) {
       toolMeta = findToolByName(state.toolMetadata.get(serverName), toolName);
     } else {
@@ -692,7 +723,7 @@ export async function executeCall(
       if (needsAuthConnection?.status === "needs-auth") {
         if (!autoAuthAttempted) {
           autoAuthAttempted = true;
-          const autoAuth = await attemptAutoAuth(state, serverName);
+          const autoAuth = await attemptAutoAuth(state, serverName, ownedSignal);
           if (autoAuth.status === "failed") {
             return {
               content: [{ type: "text" as const, text: autoAuth.message }],
@@ -702,7 +733,7 @@ export async function executeCall(
           if (autoAuth.status === "success") {
             await state.manager.close(serverName);
             clearFailure(state, serverName);
-            const connectedAfterAuth = await lazyConnect(state, serverName, signal);
+            const connectedAfterAuth = await lazyConnect(state, serverName, ownedSignal);
             if (connectedAfterAuth) {
               toolMeta = findToolByName(state.toolMetadata.get(serverName), toolName);
               if (!toolMeta) {
@@ -749,10 +780,10 @@ export async function executeCall(
       const failedAgo = getFailureAgeSeconds(state, configuredServer);
       if (failedAgo !== null && existingConnection?.status !== "needs-auth") continue;
 
-      let connected = await lazyConnect(state, configuredServer, signal);
+      let connected = await lazyConnect(state, configuredServer, ownedSignal);
       if (!connected && state.manager.getConnection(configuredServer)?.status === "needs-auth" && !autoAuthAttempted) {
         autoAuthAttempted = true;
-        const autoAuth = await attemptAutoAuth(state, configuredServer);
+        const autoAuth = await attemptAutoAuth(state, configuredServer, ownedSignal);
         if (autoAuth.status === "failed") {
           return {
             content: [{ type: "text" as const, text: autoAuth.message }],
@@ -762,7 +793,7 @@ export async function executeCall(
         if (autoAuth.status === "success") {
           await state.manager.close(configuredServer);
           clearFailure(state, configuredServer);
-          connected = await lazyConnect(state, configuredServer, signal);
+          connected = await lazyConnect(state, configuredServer, ownedSignal);
         }
       }
 
@@ -805,7 +836,7 @@ export async function executeCall(
   if (connection?.status === "needs-auth") {
     if (!autoAuthAttempted) {
       autoAuthAttempted = true;
-      const autoAuth = await attemptAutoAuth(state, serverName);
+      const autoAuth = await attemptAutoAuth(state, serverName, ownedSignal);
       if (autoAuth.status === "failed") {
         return {
           content: [{ type: "text" as const, text: autoAuth.message }],
@@ -848,11 +879,11 @@ export async function executeCall(
       if (state.ui) {
         state.ui.setStatus("mcp", `MCP: connecting to ${serverName}...`);
       }
-      connection = await state.manager.connect(serverName, definition, signal);
+      connection = await state.manager.connect(serverName, definition, ownedSignal);
       if (connection.status === "needs-auth") {
         if (!autoAuthAttempted) {
           autoAuthAttempted = true;
-          const autoAuth = await attemptAutoAuth(state, serverName);
+          const autoAuth = await attemptAutoAuth(state, serverName, ownedSignal);
           if (autoAuth.status === "failed") {
             return {
               content: [{ type: "text" as const, text: autoAuth.message }],
@@ -861,7 +892,7 @@ export async function executeCall(
           }
           if (autoAuth.status === "success") {
             await state.manager.close(serverName);
-            connection = await state.manager.connect(serverName, definition, signal);
+            connection = await state.manager.connect(serverName, definition, ownedSignal);
           }
         }
 
@@ -891,17 +922,18 @@ export async function executeCall(
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (!signal?.aborted) recordFailure(state, serverName, message);
+      const ownedSignal = combineAbortSignals(state.owner?.signal, signal);
+      if (!isAbortError(error, ownedSignal)) recordFailure(state, serverName, message);
       updateStatusBar(state);
       return {
         content: [{ type: "text" as const, text: `Failed to connect to "${serverName}": ${message}` }],
-        details: { mode: "call", error: signal?.aborted ? "aborted" : "connect_failed", message },
+        details: { mode: "call", error: isAbortError(error, ownedSignal) ? "aborted" : "connect_failed", message },
       };
     }
   }
 
   let uiSession: UiSessionRuntime | null = null;
-  const requestOptions = state.manager.getRequestOptions?.(serverName, signal) ?? (signal ? { signal } : undefined);
+  const requestOptions = state.manager.getRequestOptions?.(serverName, ownedSignal) ?? (ownedSignal ? { signal: ownedSignal } : undefined);
 
   const outputGuardOptions = resolveMcpOutputGuardOptions(state.config.settings);
   const recoverAuthConnection = async () => {
@@ -910,7 +942,7 @@ export async function executeCall(
 
     if (!autoAuthAttempted) {
       autoAuthAttempted = true;
-      const autoAuth = await attemptAutoAuth(state, serverName);
+      const autoAuth = await attemptAutoAuth(state, serverName, ownedSignal);
       if (autoAuth.status === "failed") {
         throw new SessionRecoveryAuthRequiredError(serverName, autoAuth.message);
       }
@@ -923,7 +955,7 @@ export async function executeCall(
           await state.manager.close(serverName);
         }
         clearFailure(state, serverName);
-        connection = await state.manager.connect(serverName, definition, signal);
+        connection = await state.manager.connect(serverName, definition, ownedSignal);
         return connection;
       }
     }
@@ -936,7 +968,7 @@ export async function executeCall(
 
     if (toolMeta.resourceUri) {
       const result = await withSessionRecovery(
-        { manager: state.manager, config: state.config, signal, onNeedsAuth: recoverAuthConnection },
+        { manager: state.manager, config: state.config, signal: ownedSignal, onNeedsAuth: recoverAuthConnection },
         serverName,
         (conn) => conn.client.readResource({ uri: toolMeta.resourceUri! }, requestOptions),
       );
@@ -964,13 +996,13 @@ export async function executeCall(
       : null;
 
     const result = await withSessionRecovery(
-      { manager: state.manager, config: state.config, signal, onNeedsAuth: recoverAuthConnection },
+      { manager: state.manager, config: state.config, signal: ownedSignal, onNeedsAuth: recoverAuthConnection },
       serverName,
       (conn) => abortable(conn.client.callTool({
         name: toolMeta.originalName,
         arguments: args ?? {},
         _meta: uiSession?.requestMeta,
-      }, undefined, requestOptions), signal),
+      }, undefined, requestOptions), ownedSignal),
     );
 
     if (toolMeta.uiResourceUri) {
@@ -1053,7 +1085,7 @@ export async function executeCall(
 
     return {
       content: guarded.content,
-      details: { mode: "call", error: "call_failed", message: guarded.outputGuard ? "output truncated; see outputGuard.fullOutputPath" : message, ...guardedMcpDetails(guarded) },
+      details: { mode: "call", error: isAbortError(error, ownedSignal) ? "aborted" : "call_failed", message: guarded.outputGuard ? "output truncated; see outputGuard.fullOutputPath" : message, ...guardedMcpDetails(guarded) },
     };
   } finally {
     if (uiSession?.reused) {

@@ -141,6 +141,23 @@ describe("McpOAuthProvider addClientAuthentication", () => {
     expect(params.has("scope")).toBe(false);
     expect(params.get("client_id")).toBe("my-client");
   });
+
+  it("does not mutate token request credentials after deactivation", async () => {
+    const provider = new McpOAuthProvider(
+      "auth-inactive",
+      serverUrl,
+      { clientId: "my-client", clientSecret: "my-secret", scope: "api://res/.default" },
+      { onRedirect: async () => {} },
+    );
+    const headers = new Headers();
+    const params = new URLSearchParams({ grant_type: "authorization_code" });
+    provider.deactivate();
+
+    await expect(provider.addClientAuthentication(headers, params, new URL("https://auth.example.com/token")))
+      .rejects.toThrow("OAuth flow is no longer active");
+    expect([...params.entries()]).toEqual([["grant_type", "authorization_code"]]);
+    expect([...headers.entries()]).toEqual([]);
+  });
 });
 
 describe("McpOAuthProvider authorization fallback", () => {

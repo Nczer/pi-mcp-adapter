@@ -327,6 +327,7 @@ describe("proxy auto auth", () => {
       "demo",
       "https://api.example.com/mcp",
       state.config.mcpServers.demo,
+      { signal: controller.signal },
     );
     expect(manager.connect).toHaveBeenCalledTimes(1);
     expect(manager.getRequestOptions).toHaveBeenCalledWith("demo", controller.signal);
@@ -340,6 +341,38 @@ describe("proxy auto auth", () => {
       { timeout: 1234 },
     );
     expect(result.content[0].text).toContain("ok");
+  });
+
+  it("rethrows proxy auto-auth cancellation", async () => {
+    const { executeCall } = await import("../proxy-modes.ts");
+    const controller = new AbortController();
+    const reason = new Error("request cancelled");
+    reason.name = "AbortError";
+    mocks.authenticate.mockRejectedValueOnce(reason);
+    const state = {
+      config: {
+        settings: { autoAuth: true, toolPrefix: "server" },
+        mcpServers: { demo: { url: "https://api.example.com/mcp", auth: "oauth" } },
+      },
+      manager: {
+        getConnection: vi.fn(() => ({ status: "needs-auth" })),
+        touch: vi.fn(),
+        incrementInFlight: vi.fn(),
+        decrementInFlight: vi.fn(),
+      },
+      toolMetadata: new Map([["demo", [{ name: "demo_search", originalName: "search", description: "Search", inputSchema: { type: "object" } }]]]),
+      failureTracker: new Map(),
+      ui: { setStatus: vi.fn() },
+      completedUiSessions: [],
+    } as any;
+
+    await expect(executeCall(state, "demo_search", {}, "demo", undefined, controller.signal)).rejects.toBe(reason);
+    expect(mocks.authenticate).toHaveBeenCalledWith(
+      "demo",
+      "https://api.example.com/mcp",
+      state.config.mcpServers.demo,
+      { signal: controller.signal },
+    );
   });
 
   it("surfaces aborted proxy tool calls via the forwarded AbortSignal", async () => {
@@ -385,8 +418,38 @@ describe("proxy auto auth", () => {
       undefined,
       requestOptions,
     );
-    expect(result.details).toMatchObject({ error: "call_failed", message: "request aborted" });
+    expect(result.details).toMatchObject({ error: "aborted", message: "request aborted" });
     expect(result.content[0].text).toContain("request aborted");
+  });
+
+  it("preserves owner cancellation during a proxy tool call", async () => {
+    const { executeCall } = await import("../proxy-modes.ts");
+    const owner = new AbortController();
+    const connection = {
+      status: "connected",
+      client: { callTool: vi.fn(() => new Promise<never>(() => {})) },
+    };
+    const state = {
+      config: { settings: { toolPrefix: "server" }, mcpServers: { demo: { command: "demo" } } },
+      manager: {
+        getConnection: vi.fn(() => connection),
+        getRequestOptions: vi.fn((_name: string, signal?: AbortSignal) => signal ? { signal } : undefined),
+        touch: vi.fn(),
+        incrementInFlight: vi.fn(),
+        decrementInFlight: vi.fn(),
+      },
+      owner: { signal: owner.signal },
+      toolMetadata: new Map([["demo", [{ name: "demo_search", originalName: "search", description: "Search", inputSchema: { type: "object" } }]]]),
+      failureTracker: new Map(),
+      completedUiSessions: [],
+    } as any;
+
+    const inFlight = executeCall(state, "demo_search", {}, "demo");
+    await Promise.resolve();
+    owner.abort(new Error("owner stopped"));
+    const result = await inFlight;
+
+    expect(result.details).toMatchObject({ error: "aborted", message: "owner stopped" });
   });
 
   it("shares one cold connect across concurrent proxy calls and applies timeout during bootstrap", async () => {

@@ -95,6 +95,8 @@ interface PendingAuth {
 /** Server singleton state */
 let server: Server | undefined
 let bindingPromise: Promise<void> | undefined
+let stoppingPromise: Promise<void> | undefined
+let callbackGeneration = 0
 const pendingAuths = new Map<string, PendingAuth>()
 const reservedAuthStates = new Set<string>()
 
@@ -201,8 +203,18 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
  * If strictPort is false, asks the OS for an available local port.
  */
 export async function ensureCallbackServer(options: EnsureCallbackServerOptions = {}): Promise<void> {
+  if (stoppingPromise) {
+    throw new Error("OAuth callback server stopped")
+  }
+  const generation = callbackGeneration
   while (bindingPromise) {
     await bindingPromise
+    if (generation !== callbackGeneration) {
+      throw new Error("OAuth callback server stopped")
+    }
+  }
+  if (generation !== callbackGeneration) {
+    throw new Error("OAuth callback server stopped")
   }
 
   const operation = ensureCallbackServerLocked(options)
@@ -356,30 +368,45 @@ export function cancelPendingCallback(oauthState: string): void {
 /**
  * Stop the callback server and reject all pending authorizations.
  */
-export async function stopCallbackServer(): Promise<void> {
-  if (server) {
-    await new Promise<void>((resolve) => {
-      server!.close(() => {
-        resolve()
-      })
-    })
-    server = undefined
-  }
+export function stopCallbackServer(): Promise<void> {
+  if (stoppingPromise) return stoppingPromise
 
-  setOAuthCallbackPort(getConfiguredOAuthCallbackPort())
-  callbackServerHost = DEFAULT_OAUTH_CALLBACK_HOST
-  setOAuthCallbackPath(DEFAULT_OAUTH_CALLBACK_PATH)
-
-  // Reject all pending auths (defer to allow any pending operations to complete)
-  const pendingList = Array.from(pendingAuths.entries())
-  pendingAuths.clear()
-  reservedAuthStates.clear()
-  setTimeout(() => {
-    for (const [, pending] of pendingList) {
-      clearTimeout(pending.timeout)
-      pending.reject(new Error("OAuth callback server stopped"))
+  callbackGeneration += 1
+  const cleanup = (async () => {
+    while (bindingPromise) {
+      await bindingPromise.catch(() => {})
     }
-  }, 0)
+
+    if (server) {
+      await new Promise<void>((resolve) => {
+        server!.close(() => {
+          resolve()
+        })
+      })
+      server = undefined
+    }
+
+    setOAuthCallbackPort(getConfiguredOAuthCallbackPort())
+    callbackServerHost = DEFAULT_OAUTH_CALLBACK_HOST
+    setOAuthCallbackPath(DEFAULT_OAUTH_CALLBACK_PATH)
+
+    // Reject all pending auths (defer to allow any pending operations to complete)
+    const pendingList = Array.from(pendingAuths.entries())
+    pendingAuths.clear()
+    reservedAuthStates.clear()
+    setTimeout(() => {
+      for (const [, pending] of pendingList) {
+        clearTimeout(pending.timeout)
+        pending.reject(new Error("OAuth callback server stopped"))
+      }
+    }, 0)
+  })()
+
+  const operation = cleanup.finally(() => {
+    if (stoppingPromise === operation) stoppingPromise = undefined
+  })
+  stoppingPromise = operation
+  return operation
 }
 
 /**

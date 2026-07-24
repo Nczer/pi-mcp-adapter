@@ -24,6 +24,13 @@ import { logger } from "./logger.ts";
 import { getMissingConfiguredDirectToolServers } from "./direct-tools.ts";
 import { throwIfAborted } from "./abort.ts";
 import { getAuthStorageOptions } from "./mcp-auth.ts";
+import {
+  combineAbortSignals,
+  createMcpRuntimeOwner,
+  createOwnedUi,
+  isAbortError,
+  type McpRuntimeOwner,
+} from "./runtime-owner.ts";
 
 const FAILURE_BACKOFF_MS = 60 * 1000;
 const MAX_FAILURE_MESSAGE_CHARS = 8 * 1024;
@@ -69,30 +76,44 @@ export function isTuiMode(ctx: Pick<ExtensionContext, "hasUI" | "mode">): boolea
 
 export async function initializeMcp(
   pi: ExtensionAPI,
-  ctx: ExtensionContext
+  ctx: ExtensionContext,
+  owner: McpRuntimeOwner = createMcpRuntimeOwner(),
 ): Promise<McpExtensionState> {
+  // Pi guards ExtensionContext getters after reload. Snapshot all values that
+  // can be used by asynchronous work before the first await.
   const configPath = pi.getFlag("mcp-config") as string | undefined;
-  const config = loadMcpConfig(configPath, ctx.cwd);
-  const authStorageOptions = getAuthStorageOptions(config.settings?.oauthDir, ctx.cwd);
+  const cwd = ctx.cwd;
+  const hasUI = ctx.hasUI;
+  const mode = ctx.mode;
+  const rawUi = hasUI ? ctx.ui : undefined;
+  const modelRegistry = ctx.modelRegistry;
+  const initialSignal = ctx.signal;
+  const ui = rawUi ? createOwnedUi(rawUi, owner) : undefined;
+  const runtimeSignal = combineAbortSignals(owner.signal, initialSignal);
+  const config = loadMcpConfig(configPath, cwd);
+  const authStorageOptions = getAuthStorageOptions(config.settings?.oauthDir, cwd);
 
-  const manager = new McpServerManager(ctx.cwd);
+  const manager = new McpServerManager(cwd);
+  manager.setRuntimeSignal?.(owner.signal);
   manager.setDefaultRequestTimeoutMs(config.settings?.requestTimeoutMs);
   manager.setAuthStorageOptions(authStorageOptions);
   const samplingAutoApprove = config.settings?.samplingAutoApprove === true;
-  if (config.settings?.sampling !== false && (ctx.hasUI || samplingAutoApprove)) {
+  if (config.settings?.sampling !== false && (hasUI || samplingAutoApprove)) {
     manager.setSamplingConfig({
       autoApprove: samplingAutoApprove,
-      ui: ctx.hasUI ? ctx.ui : undefined,
-      modelRegistry: ctx.modelRegistry,
-      getCurrentModel: () => ctx.model,
-      getSignal: () => ctx.signal,
+      ui,
+      modelRegistry,
+      getCurrentModel: () => owner.isActive() ? ctx.model : undefined,
+      getSignal: () => owner.isActive()
+        ? combineAbortSignals(owner.signal, ctx.signal)
+        : owner.signal,
     });
   }
-  const elicitationEnabled = config.settings?.elicitation !== false && ctx.hasUI;
-  if (elicitationEnabled) {
+  const elicitationEnabled = config.settings?.elicitation !== false && hasUI;
+  if (elicitationEnabled && ui) {
     manager.setElicitationConfig({
-      ui: ctx.ui,
-      allowUrl: isTuiMode(ctx),
+      ui,
+      allowUrl: mode === "tui",
     });
   }
   const lifecycle = new McpLifecycleManager(manager);
@@ -102,8 +123,8 @@ export async function initializeMcp(
   const failureMessages = new Map<string, string>();
   const uiResourceHandler = new UiResourceHandler(manager, config);
   const consentManager = new ConsentManager("once-per-server");
-  const ui = ctx.hasUI ? ctx.ui : undefined;
   const state: McpExtensionState = {
+    owner,
     manager,
     lifecycle,
     toolMetadata,
@@ -116,10 +137,24 @@ export async function initializeMcp(
     consentManager,
     uiServer: null,
     completedUiSessions: [],
-    openBrowser: (url: string) => openUrl(pi, url, process.env.BROWSER),
+    openBrowser: async (url: string) => {
+      owner.throwIfInactive();
+      await openUrl(pi, url, process.env.BROWSER, owner.signal);
+      owner.throwIfInactive();
+    },
     ui,
-    sendMessage: (message, options) => pi.sendMessage(message as unknown as Parameters<typeof pi.sendMessage>[0], options),
+    sendMessage: (message, options) => {
+      if (!owner.isActive()) return;
+      pi.sendMessage(message as unknown as Parameters<typeof pi.sendMessage>[0], options);
+    },
   };
+  owner.addCleanup(() => lifecycle.gracefulShutdown());
+  owner.addCleanup(() => {
+    if (state.uiServer) {
+      state.uiServer.close("runtime_owner_stopped");
+      state.uiServer = null;
+    }
+  });
 
   const serverEntries = Object.entries(config.mcpServers);
   if (serverEntries.length === 0) {
@@ -174,19 +209,20 @@ export async function initializeMcp(
         return mode === "keep-alive" || mode === "eager";
       });
 
-  if (ctx.hasUI && startupServers.length > 0) {
-    ctx.ui.setStatus("mcp", `MCP: connecting to ${startupServers.length} servers...`);
+  if (ui && startupServers.length > 0) {
+    ui.setStatus("mcp", `MCP: connecting to ${startupServers.length} servers...`);
   }
 
   const results = await parallelLimit(startupServers, 10, async ([name, definition]) => {
     try {
-      const connection = await manager.connect(name, definition, ctx.signal);
+      const connection = await manager.connect(name, definition, runtimeSignal);
       if (connection.status === "needs-auth") {
         return { name, definition, connection: null, error: `OAuth authentication required. Run /mcp-auth ${name}.` };
       }
       return { name, definition, connection, error: null };
     } catch (error) {
-      if (ctx.signal?.aborted) {
+      if (isAbortError(error, runtimeSignal)) {
+        if (owner.signal.aborted) throw error;
         return { name, definition, connection: null, error: null };
       }
       const message = error instanceof Error ? error.message : String(error);
@@ -194,25 +230,17 @@ export async function initializeMcp(
     }
   });
 
-  try {
-    void ctx.hasUI;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!message.includes("extension ctx is stale after session replacement or reload")) {
-      throw error;
-    }
-    // Session torn down while the eager/keep-alive connect(s) above were still
-    // in flight — abandon quietly instead of touching a dead ctx below.
-    return state;
-  }
+  if (initialSignal?.aborted) return state;
+  owner.throwIfInactive();
 
   for (const { name, definition, connection, error } of results) {
+    owner.throwIfInactive();
     if (error || !connection) {
-      if (ctx.signal?.aborted) continue;
+      if (initialSignal?.aborted) continue;
       if (error) recordFailure(state, name, error);
       const displayError = sanitizeTerminalText(error ?? "Unknown connection failure");
-      if (ctx.hasUI) {
-        ctx.ui.notify(`MCP: Failed to connect to ${name}: ${displayError}`, "error");
+      if (ui) {
+        ui.notify(`MCP: Failed to connect to ${name}: ${displayError}`, "error");
       }
       console.error(`MCP: Failed to connect to ${name}: ${displayError}`);
       continue;
@@ -228,8 +256,8 @@ export async function initializeMcp(
     updateMetadataCache(state, name);
     markKeepAliveAfterConnect(state, name);
 
-    if (failedTools.length > 0 && ctx.hasUI) {
-      ctx.ui.notify(
+    if (failedTools.length > 0 && ui) {
+      ui.notify(
         `MCP: ${name} - ${failedTools.length} tools skipped`,
         "warning"
       );
@@ -238,12 +266,12 @@ export async function initializeMcp(
 
   const connectedCount = results.filter(r => r.connection).length;
   const failedCount = results.filter(r => r.error).length;
-  if (ctx.hasUI && connectedCount > 0) {
+  if (ui && connectedCount > 0) {
     const totalTools = totalToolCount(state);
     const msg = failedCount > 0
       ? `MCP: ${connectedCount}/${startupServers.length} servers connected (${totalTools} tools)`
       : `MCP: ${connectedCount} servers connected (${totalTools} tools)`;
-    ctx.ui.notify(msg, "info");
+    ui.notify(msg, "info");
   }
 
   const envDirect = process.env.MCP_DIRECT_TOOLS;
@@ -258,7 +286,7 @@ export async function initializeMcp(
         async (name) => {
           const definition = config.mcpServers[name];
           try {
-            const connection = await manager.connect(name, definition, ctx.signal);
+            const connection = await manager.connect(name, definition, runtimeSignal);
             if (connection.status === "needs-auth") {
               return { name, ok: false };
             }
@@ -268,7 +296,10 @@ export async function initializeMcp(
             clearFailure(state, name);
             return { name, ok: true };
           } catch (error) {
-            if (ctx.signal?.aborted) return { name, ok: false };
+            if (isAbortError(error, runtimeSignal)) {
+              if (owner.signal.aborted) throw error;
+              return { name, ok: false };
+            }
             const message = error instanceof Error ? error.message : String(error);
             recordFailure(state, name, message);
             logger.debug(`MCP: direct-tools bootstrap failed for ${name}: ${sanitizeTerminalText(message)}`);
@@ -277,13 +308,15 @@ export async function initializeMcp(
         },
       );
       const bootstrapped = bootstrapResults.filter(r => r.ok).map(r => r.name);
-      if (bootstrapped.length > 0 && ctx.hasUI) {
-        ctx.ui.notify(`MCP: direct tools for ${bootstrapped.join(", ")} will be available after restart`, "info");
+      owner.throwIfInactive();
+      if (bootstrapped.length > 0 && ui) {
+        ui.notify(`MCP: direct tools for ${bootstrapped.join(", ")} will be available after restart`, "info");
       }
     }
   }
 
   lifecycle.setReconnectCallback((serverName) => {
+    if (!owner.isActive()) return;
     updateServerMetadata(state, serverName);
     updateMetadataCache(state, serverName);
     clearFailure(state, serverName);
@@ -291,18 +324,21 @@ export async function initializeMcp(
   });
 
   lifecycle.setReconnectFailureCallback((serverName, error) => {
+    if (!owner.isActive()) return;
     const message = error instanceof Error ? error.message : String(error);
     recordFailure(state, serverName, message);
     updateStatusBar(state);
   });
 
   lifecycle.setIdleShutdownCallback((serverName) => {
+    if (!owner.isActive()) return;
     const idleMinutes = getEffectiveIdleTimeoutMinutes(state, serverName);
     logger.debug(`${serverName} shut down (idle ${idleMinutes}m)`);
     updateStatusBar(state);
   });
 
-  lifecycle.startHealthChecks();
+  owner.throwIfInactive();
+  lifecycle.startHealthChecks(runtimeSignal);
 
   return state;
 }
@@ -401,6 +437,8 @@ export function getFailureMessage(state: McpExtensionState, serverName: string):
 }
 
 export async function lazyConnect(state: McpExtensionState, serverName: string, signal?: AbortSignal): Promise<boolean> {
+  const ownedSignal = combineAbortSignals(state.owner?.signal, signal);
+  throwIfAborted(ownedSignal);
   const connection = state.manager.getConnection(serverName);
   if (connection?.status === "needs-auth") {
     return false;
@@ -421,7 +459,7 @@ export async function lazyConnect(state: McpExtensionState, serverName: string, 
     if (state.ui) {
       state.ui.setStatus("mcp", `MCP: connecting to ${serverName}...`);
     }
-    const newConnection = await state.manager.connect(serverName, definition, signal);
+    const newConnection = await state.manager.connect(serverName, definition, ownedSignal);
     if (newConnection.status === "needs-auth") {
       return false;
     }
@@ -432,8 +470,8 @@ export async function lazyConnect(state: McpExtensionState, serverName: string, 
     updateStatusBar(state);
     return true;
   } catch (error) {
-    if (signal?.aborted) {
-      throwIfAborted(signal);
+    if (isAbortError(error, ownedSignal)) {
+      throwIfAborted(ownedSignal);
     }
     const message = error instanceof Error ? error.message : String(error);
     recordFailure(state, serverName, message);

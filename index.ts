@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ToolInfo } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
 import type { McpExtensionState } from "./state.ts";
 import { Type } from "typebox";
 import { showStatus, showTools, reconnectServer, reconnectServers, authenticateServer, logoutServer, openMcpAuthPanel, openMcpPanel, openMcpSetup } from "./commands.ts";
@@ -7,14 +7,16 @@ import { buildProxyDescription, createDirectToolExecutor, getMissingConfiguredDi
 import { flushMetadataCache, initializeMcp, updateStatusBar } from "./init.ts";
 import { loadMetadataCache } from "./metadata-cache.ts";
 import { executeAuthComplete, executeAuthStart, executeCall, executeConnect, executeDescribe, executeInstructions, executeList, executeSearch, executeStatus, executeUiMessages } from "./proxy-modes.ts";
-import { getConfigPathFromArgv, normalizeDirectToolInputSchema, truncateAtWord } from "./utils.ts";
+import { formatTerminalError, getConfigPathFromArgv, normalizeDirectToolInputSchema, truncateAtWord } from "./utils.ts";
 import { initializeOAuth, shutdownOAuth } from "./mcp-auth-flow.ts";
 import { createMcpDirectToolCallRenderer, renderMcpProxyToolCall, renderMcpToolResult } from "./tool-result-renderer.ts";
 import { toolErrorOverride } from "./error-signal.ts";
+import { createMcpRuntimeOwner, createOwnedUi, isAbortError, type McpRuntimeOwner } from "./runtime-owner.ts";
 
 export default function mcpAdapter(pi: ExtensionAPI) {
   let state: McpExtensionState | null = null;
   let initPromise: Promise<McpExtensionState> | null = null;
+  let currentOwner: McpRuntimeOwner | null = null;
   let lifecycleGeneration = 0;
 
   async function shutdownState(currentState: McpExtensionState | null, reason: string): Promise<void> {
@@ -33,10 +35,14 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     }
 
     try {
-      await currentState.lifecycle.gracefulShutdown();
+      if (currentState.owner) {
+        await currentState.owner.stop(reason);
+      } else {
+        await currentState.lifecycle.gracefulShutdown();
+      }
     } catch (error) {
       if (flushError) {
-        console.error("MCP: graceful shutdown failed after metadata flush error", error);
+        console.error(`MCP: graceful shutdown failed after metadata flush error: ${formatTerminalError(error)}`);
       } else {
         throw error;
       }
@@ -99,35 +105,44 @@ export default function mcpAdapter(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     const generation = ++lifecycleGeneration;
     const previousState = state;
+    const previousOwner = currentOwner;
+    const owner = createMcpRuntimeOwner();
+    currentOwner = owner;
     state = null;
     initPromise = null;
 
+    // Abort synchronously before awaiting cleanup so old callbacks and startup
+    // work cannot resume into a stale ExtensionContext.
+    const stopPrevious = previousOwner?.stop("MCP extension session restarted") ?? Promise.resolve();
     try {
       await Promise.all([
+        stopPrevious,
         shutdownState(previousState, "session_restart"),
         shutdownOAuth(),
       ]);
     } catch (error) {
-      console.error("MCP: failed to shut down previous session state", error);
+      console.error(`MCP: failed to shut down previous session state: ${formatTerminalError(error)}`);
     }
 
-    if (generation !== lifecycleGeneration) {
+    if (generation !== lifecycleGeneration || !owner.isActive()) {
       return;
     }
 
-    await initializeOAuth().catch(err => {
-      console.error("MCP OAuth initialization failed:", err);
+    await initializeOAuth(owner.signal).catch(err => {
+      console.error(`MCP OAuth initialization failed: ${formatTerminalError(err)}`);
     });
 
-    const promise = initializeMcp(pi, ctx);
+    if (generation !== lifecycleGeneration || !owner.isActive()) return;
+
+    const promise = initializeMcp(pi, ctx, owner);
     initPromise = promise;
 
     promise.then(async (nextState) => {
-      if (generation !== lifecycleGeneration || initPromise !== promise) {
+      if (!owner.isActive() || generation !== lifecycleGeneration || initPromise !== promise) {
         try {
           await shutdownState(nextState, "stale_session_start");
         } catch (error) {
-          console.error("MCP: failed to clean stale session state", error);
+          console.error(`MCP: failed to clean stale session state: ${formatTerminalError(error)}`);
         }
         return;
       }
@@ -136,13 +151,13 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       updateStatusBar(nextState);
       initPromise = null;
     }).catch(err => {
-      if (generation !== lifecycleGeneration) {
+      if (!owner.isActive() || generation !== lifecycleGeneration) {
         return;
       }
       if (initPromise !== promise && initPromise !== null) {
         return;
       }
-      console.error("MCP initialization failed:", err);
+      console.error(`MCP initialization failed: ${formatTerminalError(err)}`);
       initPromise = null;
     });
   });
@@ -150,16 +165,22 @@ export default function mcpAdapter(pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     ++lifecycleGeneration;
     const currentState = state;
+    const owner = currentOwner;
+    currentOwner = null;
     state = null;
     initPromise = null;
 
+    // Abort before awaiting cleanup so delayed initialization cannot touch stale
+    // Pi context after session shutdown.
+    const stopOwner = owner?.stop("MCP extension session shutdown") ?? Promise.resolve();
     try {
       await Promise.all([
+        stopOwner,
         shutdownState(currentState, "session_shutdown"),
         shutdownOAuth(),
       ]);
     } catch (error) {
-      console.error("MCP: session shutdown cleanup failed", error);
+      console.error(`MCP: session shutdown cleanup failed: ${formatTerminalError(error)}`);
     }
   });
 
@@ -191,17 +212,31 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       return servers.length > 0 ? servers : null;
     },
     handler: async (args, ctx) => {
+      const commandOwner = currentOwner;
+      const commandReload = typeof ctx.reload === "function" ? ctx.reload.bind(ctx) : async () => {};
+      const commandHasUI = ctx.hasUI;
+      const commandCtx = {
+        hasUI: commandHasUI,
+        ui: commandHasUI
+          ? commandOwner ? createOwnedUi(ctx.ui, commandOwner) : ctx.ui
+          : undefined,
+        cwd: ctx.cwd,
+        mode: ctx.mode,
+        signal: commandOwner?.signal ?? ctx.signal,
+      } as unknown as ExtensionContext;
       if (!state && initPromise) {
         try {
-          state = await initPromise;
+          const initialized = await initPromise;
+          commandOwner?.throwIfInactive();
+          state = initialized;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          if (ctx.hasUI) ctx.ui.notify(`MCP initialization failed: ${message}`, "error");
+          if (commandCtx.hasUI) commandCtx.ui?.notify(`MCP initialization failed: ${message}`, "error");
           return;
         }
       }
       if (!state) {
-        if (ctx.hasUI) ctx.ui.notify("MCP not initialized", "error");
+        if (commandCtx.hasUI) commandCtx.ui?.notify("MCP not initialized", "error");
         return;
       }
 
@@ -212,15 +247,18 @@ export default function mcpAdapter(pi: ExtensionAPI) {
 
       switch (subcommand) {
         case "reconnect":
-          await reconnectServers(state, ctx, targetServer);
+          commandOwner?.throwIfInactive();
+          await reconnectServers(state, commandCtx, targetServer);
           break;
         case "tools":
-          await showTools(state, ctx);
+          await showTools(state, commandCtx);
           break;
         case "setup": {
-          const result = await openMcpSetup(state, pi, ctx, earlyConfigPath, "setup");
+          commandOwner?.throwIfInactive();
+          const result = await openMcpSetup(state, pi, commandCtx, earlyConfigPath, "setup");
           if (result?.configChanged) {
-            await ctx.reload();
+            commandOwner?.throwIfInactive();
+            await commandReload();
             return;
           }
           break;
@@ -228,23 +266,26 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         case "logout": {
           const serverName = rest;
           if (!serverName) {
-            if (ctx.hasUI) ctx.ui.notify("Usage: /mcp logout <server>", "error");
+            if (commandCtx.hasUI) commandCtx.ui?.notify("Usage: /mcp logout <server>", "error");
             return;
           }
-          await logoutServer(serverName, state, ctx);
+          commandOwner?.throwIfInactive();
+          await logoutServer(serverName, state, commandCtx);
           break;
         }
         case "status":
         case "":
         default:
-          if (ctx.hasUI) {
-            const result = await openMcpPanel(state, pi, ctx, earlyConfigPath);
+          if (commandCtx.hasUI) {
+            commandOwner?.throwIfInactive();
+            const result = await openMcpPanel(state, pi, commandCtx, earlyConfigPath);
             if (result?.configChanged) {
-              await ctx.reload();
+              commandOwner?.throwIfInactive();
+              await commandReload();
               return;
             }
           } else {
-            await showStatus(state, ctx);
+            await showStatus(state, commandCtx);
           }
           break;
       }
@@ -254,33 +295,47 @@ export default function mcpAdapter(pi: ExtensionAPI) {
   pi.registerCommand("mcp-auth", {
     description: "Authenticate with an MCP server (OAuth)",
     handler: async (args, ctx) => {
+      const commandOwner = currentOwner;
+      const commandHasUI = ctx.hasUI;
+      const commandCtx = {
+        hasUI: commandHasUI,
+        ui: commandHasUI
+          ? commandOwner ? createOwnedUi(ctx.ui, commandOwner) : ctx.ui
+          : undefined,
+        cwd: ctx.cwd,
+        mode: ctx.mode,
+        signal: commandOwner?.signal ?? ctx.signal,
+      } as unknown as ExtensionContext;
       const serverName = args?.trim();
-      if (!serverName && !ctx.hasUI) {
+      if (!serverName && !commandCtx.hasUI) {
         return;
       }
 
       if (!state && initPromise) {
         try {
-          state = await initPromise;
+          const initialized = await initPromise;
+          commandOwner?.throwIfInactive();
+          state = initialized;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          if (ctx.hasUI) ctx.ui.notify(`MCP initialization failed: ${message}`, "error");
+          if (commandCtx.hasUI) commandCtx.ui?.notify(`MCP initialization failed: ${message}`, "error");
           return;
         }
       }
       if (!state) {
-        if (ctx.hasUI) ctx.ui.notify("MCP not initialized", "error");
+        if (commandCtx.hasUI) commandCtx.ui?.notify("MCP not initialized", "error");
         return;
       }
 
       if (!serverName) {
-        await openMcpAuthPanel(state, pi, ctx, earlyConfigPath);
+        await openMcpAuthPanel(state, pi, commandCtx, earlyConfigPath);
         return;
       }
 
-      const result = await authenticateServer(serverName, state.config, ctx);
+      const result = await authenticateServer(serverName, state.config, commandCtx);
       if (result.ok) {
-        await reconnectServer(state, ctx, serverName);
+        commandOwner?.throwIfInactive();
+        await reconnectServer(state, commandCtx, serverName);
       }
     },
   });
@@ -323,6 +378,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         server?: string;
         action?: string;
       }, signal, _onUpdate, _ctx) {
+        const executeOwner = currentOwner;
         let parsedArgs: Record<string, unknown> | undefined;
         if (params.args !== undefined && params.args !== "") {
           let args: unknown;
@@ -348,8 +404,11 @@ export default function mcpAdapter(pi: ExtensionAPI) {
 
         if (!state && initPromise) {
           try {
-            state = await initPromise;
+            const initialized = await initPromise;
+            executeOwner?.throwIfInactive();
+            state = initialized;
           } catch (error) {
+            if (executeOwner && isAbortError(error, executeOwner.signal)) throw error;
             const message = error instanceof Error ? error.message : String(error);
             return {
               content: [{ type: "text" as const, text: `MCP initialization failed: ${message}` }],
@@ -363,6 +422,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
             details: { error: "not_initialized" },
           };
         }
+        executeOwner?.throwIfInactive();
 
         if (params.action === "ui-messages") {
           return executeUiMessages(state);
@@ -374,7 +434,9 @@ export default function mcpAdapter(pi: ExtensionAPI) {
               details: { mode: "auth-start", error: "missing_server" },
             };
           }
-          return executeAuthStart(state, params.server);
+          return signal
+            ? executeAuthStart(state, params.server, signal)
+            : executeAuthStart(state, params.server);
         }
         if (params.action === "auth-complete") {
           if (!params.server) {
@@ -390,7 +452,9 @@ export default function mcpAdapter(pi: ExtensionAPI) {
               details: { mode: "auth-complete", error: "missing_input" },
             };
           }
-          return executeAuthComplete(state, params.server, input);
+          return signal
+            ? executeAuthComplete(state, params.server, input, signal)
+            : executeAuthComplete(state, params.server, input);
         }
         if (params.tool) {
           return executeCall(state, params.tool, parsedArgs, params.server, getPiTools, signal);

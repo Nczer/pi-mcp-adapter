@@ -19,6 +19,7 @@ import { supportsOAuth, authenticate, removeAuth } from "./mcp-auth-flow.ts";
 import { getAuthForUrl, getAuthStorageOptions } from "./mcp-auth.ts";
 import { loadOnboardingState, markSetupCompleted as persistSetupCompleted, markSharedConfigHintShown } from "./onboarding-state.ts";
 import { openPath, resolveServerUrl, sanitizeTerminalText } from "./utils.ts";
+import { isAbortError } from "./runtime-owner.ts";
 
 export async function showStatus(state: McpExtensionState, ctx: ExtensionContext): Promise<void> {
   if (!ctx.hasUI) return;
@@ -88,19 +89,25 @@ export async function reconnectServer(
   name: string,
 ): Promise<boolean> {
   const definition = state.config.mcpServers[name];
+  const ui = ctx.hasUI ? ctx.ui : undefined;
+  const signal = state.owner?.signal;
   if (!definition) {
-    if (ctx.hasUI) {
-      ctx.ui.notify(`Server "${name}" not found in config`, "error");
+    if (ui) {
+      ui.notify(`Server "${name}" not found in config`, "error");
     }
     return false;
   }
 
   try {
     await state.manager.close(name);
-    const connection = await state.manager.connect(name, definition);
+    state.owner?.throwIfInactive();
+    const connection = signal
+      ? await state.manager.connect(name, definition, signal)
+      : await state.manager.connect(name, definition);
+    state.owner?.throwIfInactive();
     if (connection.status === "needs-auth") {
-      if (ctx.hasUI) {
-        ctx.ui.notify(`MCP: ${name} requires OAuth. Run /mcp-auth ${name} first.`, "warning");
+      if (ui) {
+        ui.notify(`MCP: ${name} requires OAuth. Run /mcp-auth ${name} first.`, "warning");
       }
       updateStatusBar(state);
       return false;
@@ -118,22 +125,23 @@ export async function reconnectServer(
     markKeepAliveAfterConnect(state, name);
     clearFailure(state, name);
 
-    if (ctx.hasUI) {
-      ctx.ui.notify(
+    if (ui) {
+      ui.notify(
         `MCP: Reconnected to ${name} (${connection.tools.length} tools, ${connection.resources.length} resources)`,
         "info"
       );
       if (failedTools.length > 0) {
-        ctx.ui.notify(`MCP: ${name} - ${failedTools.length} tools skipped`, "warning");
+        ui.notify(`MCP: ${name} - ${failedTools.length} tools skipped`, "warning");
       }
     }
     updateStatusBar(state);
     return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    if (isAbortError(error, signal)) throw error;
     recordFailure(state, name, message);
-    if (ctx.hasUI) {
-      ctx.ui.notify(`MCP: Failed to reconnect to ${name}: ${sanitizeTerminalText(message)}`, "error");
+    if (ui) {
+      ui.notify(`MCP: Failed to reconnect to ${name}: ${sanitizeTerminalText(message)}`, "error");
     }
     updateStatusBar(state);
     return false;
@@ -163,20 +171,24 @@ export async function reconnectServers(
 export async function authenticateServer(
   serverName: string,
   config: McpConfig,
-  ctx: ExtensionContext
+  ctx: ExtensionContext,
+  signal?: AbortSignal,
 ): Promise<McpAuthResult> {
-  if (!ctx.hasUI) return { ok: false, message: "OAuth authentication requires an interactive session." };
+  const ui = ctx.hasUI ? ctx.ui : undefined;
+  const cwd = ctx.cwd;
+  signal ??= ctx.signal;
+  if (!ui) return { ok: false, message: "OAuth authentication requires an interactive session." };
 
   const definition = config.mcpServers[serverName];
   if (!definition) {
     const message = `Server "${serverName}" not found in config`;
-    ctx.ui.notify(message, "error");
+    ui.notify(message, "error");
     return { ok: false, message };
   }
 
   if (!supportsOAuth(definition)) {
     const message = `Server "${serverName}" does not use OAuth authentication. Set "auth": "oauth" or omit auth for auto-detection.`;
-    ctx.ui.notify(
+    ui.notify(
       `Server "${serverName}" does not use OAuth authentication.\n` +
       `Set "auth": "oauth" or omit auth for auto-detection.`,
       "error"
@@ -188,38 +200,41 @@ export async function authenticateServer(
     const serverUrl = resolveServerUrl(definition);
     if (!serverUrl) {
       const message = `Server "${serverName}" has no URL configured (OAuth requires HTTP transport)`;
-      ctx.ui.notify(message, "error");
+      ui.notify(message, "error");
       return { ok: false, message };
     }
 
-    ctx.ui.setStatus("mcp-auth", `Authenticating ${serverName}...`);
-    const authStorageOptions = getAuthStorageOptions(config.settings?.oauthDir, ctx.cwd);
+    ui.setStatus("mcp-auth", `Authenticating ${serverName}...`);
+    const authStorageOptions = getAuthStorageOptions(config.settings?.oauthDir, cwd);
     const status = await authenticate(serverName, serverUrl, definition, {
       ...(authStorageOptions.baseDir ? { authStorageOptions } : {}),
       onAuthorizationUrl: (authorizationUrl) => {
-        ctx.ui.notify(
+        ui.notify(
           `Open this URL to authenticate ${serverName}:\n\n${authorizationUrl}\n\n` +
           "After approving, return to Pi; the local callback will complete automatically.",
           "info"
         );
       },
+      signal,
     });
+    if (signal?.aborted) signal.throwIfAborted();
 
     if (status === "authenticated") {
       const message = `OAuth authentication successful for "${serverName}".`;
-      ctx.ui.notify(message, "info");
+      ui.notify(message, "info");
       return { ok: true, message };
     }
 
     const message = `OAuth authentication failed for "${serverName}".`;
-    ctx.ui.notify(message, "error");
+    ui.notify(message, "error");
     return { ok: false, message };
   } catch (error) {
+    if (signal?.aborted) throw error;
     const message = error instanceof Error ? error.message : String(error);
-    ctx.ui.notify(`Failed to authenticate "${serverName}": ${message}`, "error");
+    ui.notify(`Failed to authenticate "${serverName}": ${message}`, "error");
     return { ok: false, message };
   } finally {
-    ctx.ui.setStatus("mcp-auth", undefined);
+    if (!signal?.aborted) ui.setStatus("mcp-auth", undefined);
   }
 }
 
@@ -229,18 +244,21 @@ export async function logoutServer(
   ctx: ExtensionContext
 ): Promise<{ ok: boolean; message: string }> {
   const definition = state.config.mcpServers[serverName];
+  const ui = ctx.hasUI ? ctx.ui : undefined;
   if (!definition) {
     const message = `Server "${serverName}" not found in config`;
-    if (ctx.hasUI) ctx.ui.notify(message, "error");
+    if (ui) ui.notify(message, "error");
     return { ok: false, message };
   }
 
-  await removeAuth(serverName, { authStorageOptions: state.authStorageOptions });
+  await removeAuth(serverName, { authStorageOptions: state.authStorageOptions, signal: state.owner?.signal });
+  state.owner?.throwIfInactive();
   await state.manager.close(serverName);
+  state.owner?.throwIfInactive();
   updateStatusBar(state);
 
   const message = `OAuth credentials cleared for "${serverName}". Run /mcp-auth ${serverName} to authenticate again.`;
-  if (ctx.hasUI) ctx.ui.notify(message, "info");
+  if (ui) ui.notify(message, "info");
   return { ok: true, message };
 }
 

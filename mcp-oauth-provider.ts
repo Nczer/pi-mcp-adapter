@@ -85,6 +85,7 @@ export interface McpOAuthCallbacks {
  */
 export class McpOAuthProvider implements OAuthClientProvider {
   private readonly redirectUrlSnapshot: string | undefined
+  private active = true
 
   constructor(
     private serverName: string,
@@ -100,6 +101,14 @@ export class McpOAuthProvider implements OAuthClientProvider {
 
   private get usesClientCredentials(): boolean {
     return this.config.grantType === "client_credentials"
+  }
+
+  deactivate(): void {
+    this.active = false
+  }
+
+  private throwIfInactive(): void {
+    if (!this.active) throw new Error("OAuth flow is no longer active")
   }
 
   /**
@@ -184,6 +193,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
       clientSecretExpiresAt: info.client_secret_expires_at,
       redirectUris,
     }
+    this.throwIfInactive()
     updateClientInfo(this.serverName, clientInfo, this.serverUrl, this.storageOptions)
   }
 
@@ -217,6 +227,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
       expiresAt: tokens.expires_in ? Date.now() / 1000 + tokens.expires_in : undefined,
       scope: tokens.scope,
     }
+    this.throwIfInactive()
     updateTokens(this.serverName, storedTokens, this.serverUrl, this.storageOptions)
   }
 
@@ -235,6 +246,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
     }
     // No saved oauthState means we're on the post-refresh authorize fallback.
     const entry = await getAuthForUrl(this.serverName, this.serverUrl, this.storageOptions)
+    this.throwIfInactive()
     if (!entry?.oauthState) {
       throw new UnauthorizedError(
         `Re-authentication required for MCP server: ${this.serverName}`,
@@ -248,6 +260,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
    * Save the PKCE code verifier.
    */
   async saveCodeVerifier(codeVerifier: string): Promise<void> {
+    this.throwIfInactive()
     updateCodeVerifier(this.serverName, codeVerifier, this.serverUrl, this.storageOptions)
   }
 
@@ -270,6 +283,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
    * Save the OAuth state parameter for CSRF protection.
    */
   async saveState(state: string): Promise<void> {
+    this.throwIfInactive()
     updateOAuthState(this.serverName, state, this.serverUrl, this.storageOptions)
   }
 
@@ -295,6 +309,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
    * Clears tokens, client info, or all credentials based on the type.
    */
   async invalidateCredentials(type: "all" | "client" | "tokens"): Promise<void> {
+    this.throwIfInactive()
     switch (type) {
       case "all":
         clearAllCredentials(this.serverName, this.storageOptions)
@@ -313,11 +328,13 @@ export class McpOAuthProvider implements OAuthClientProvider {
    * default token endpoint authentication behavior.
    */
   addClientAuthentication: AddClientAuthentication = async (headers, params, _url, metadata) => {
+    this.throwIfInactive()
     if (params.get("grant_type") === "authorization_code" && !params.has("scope") && this.config.scope) {
       params.set("scope", this.config.scope)
     }
 
     const clientInfo = await this.clientInformation()
+    this.throwIfInactive()
     if (!clientInfo) {
       return
     }

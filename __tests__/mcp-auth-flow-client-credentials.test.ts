@@ -549,6 +549,71 @@ describe("mcp-auth-flow explicit auth", () => {
     expect(getOAuthState("browser-fail")).toBeUndefined();
   });
 
+  it("clears a pending manual flow when cancellation happens after callback registration", async () => {
+    mocks.sdkAuth.mockImplementationOnce(async (provider) => {
+      await provider.redirectToAuthorization(new URL("https://auth.example.com/authorize"));
+      return "REDIRECT";
+    });
+    mocks.waitForCallback.mockReturnValueOnce(new Promise<string>(() => {}));
+    const controller = new AbortController();
+    const reason = new Error("request cancelled");
+    const { authenticate, hasPendingAuth } = await import("../mcp-auth-flow.ts");
+    const { getOAuthState } = await import("../mcp-auth.ts");
+
+    await expect(authenticate("cancel-manual", "https://api.example.com/mcp", {
+      url: "https://api.example.com/mcp",
+      auth: "oauth",
+    }, {
+      signal: controller.signal,
+      onAuthorizationUrl: () => controller.abort(reason),
+    })).rejects.toBe(reason);
+
+    expect(mocks.waitForCallback).toHaveBeenCalledTimes(1);
+    expect(mocks.cancelPendingCallback).toHaveBeenCalledWith(expect.any(String));
+    expect(hasPendingAuth("cancel-manual")).toBe(false);
+    expect(getOAuthState("cancel-manual")).toBeUndefined();
+  });
+
+  it("blocks a detached SDK token write after authentication cancellation", async () => {
+    let releaseTokenExchange!: () => void;
+    const tokenExchange = new Promise<void>(resolve => {
+      releaseTokenExchange = resolve;
+    });
+    let markTokenExchangeStarted!: () => void;
+    const tokenExchangeStarted = new Promise<void>(resolve => {
+      markTokenExchangeStarted = resolve;
+    });
+    mocks.sdkAuth
+      .mockImplementationOnce(async (provider) => {
+        await provider.redirectToAuthorization(new URL("https://auth.example.com/authorize"));
+        return "REDIRECT";
+      })
+      .mockImplementationOnce(async (provider) => {
+        markTokenExchangeStarted();
+        await tokenExchange;
+        await provider.saveTokens({ access_token: "late-token", token_type: "Bearer" });
+        return "AUTHORIZED";
+      });
+    mocks.waitForCallback.mockResolvedValueOnce("manual-code");
+    mocks.open.mockResolvedValueOnce(undefined);
+    const controller = new AbortController();
+    const reason = new Error("request cancelled");
+    const { authenticate } = await import("../mcp-auth-flow.ts");
+    const { getAuthForUrl } = await import("../mcp-auth.ts");
+
+    const authentication = authenticate("cancel-token", "https://api.example.com/mcp", {
+      url: "https://api.example.com/mcp",
+      auth: "oauth",
+    }, { signal: controller.signal });
+    await tokenExchangeStarted;
+    controller.abort(reason);
+    await expect(authentication).rejects.toBe(reason);
+
+    releaseTokenExchange();
+    await new Promise(resolve => setImmediate(resolve));
+    expect(getAuthForUrl("cancel-token", "https://api.example.com/mcp")?.tokens).toBeUndefined();
+  });
+
   it("uses a custom authorization URL handler instead of raw console output", async () => {
     const authorizationUrl = "https://auth.example.com/authorize?resource=https%3A%2F%2Fmcp.sentry.dev%2Fmcp";
     mocks.sdkAuth.mockImplementationOnce(async (provider) => {

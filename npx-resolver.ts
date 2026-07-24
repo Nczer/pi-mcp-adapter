@@ -2,6 +2,7 @@
 import { existsSync, readFileSync, realpathSync, readdirSync, statSync, writeFileSync, renameSync, mkdirSync, openSync, readSync, closeSync } from "node:fs";
 import { join, dirname, extname, resolve, sep } from "node:path";
 import { getAgentPath } from "./agent-dir.ts";
+import { throwIfAborted } from "./abort.ts";
 import crossSpawn from "cross-spawn";
 
 const CACHE_VERSION = 1;
@@ -39,8 +40,10 @@ interface ParsedPackageSpec {
 
 export async function resolveNpxBinary(
   command: string,
-  args: string[]
+  args: string[],
+  signal?: AbortSignal,
 ): Promise<NpxResolution | null> {
+  throwIfAborted(signal);
   const parsed = command === "npx"
     ? parseNpxArgs(args)
     : command === "npm"
@@ -70,7 +73,7 @@ export async function resolveNpxBinary(
   }
 
   // Slow path: force npx cache population
-  await forceNpxCache(parsed.packageSpec);
+  await forceNpxCache(parsed.packageSpec, signal);
   const resolvedAfterInstall = resolveFromNpmCache(parsed.packageSpec, parsed.binName);
   if (resolvedAfterInstall) {
     saveCacheEntry(cacheKey, resolvedAfterInstall);
@@ -243,7 +246,8 @@ function resolveFromNpmCache(packageSpec: string, binName?: string): NpxCacheEnt
 
 const FORCE_CACHE_TIMEOUT_MS = 30_000;
 
-async function forceNpxCache(packageSpec: string): Promise<void> {
+async function forceNpxCache(packageSpec: string, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
   try {
     await new Promise<void>((resolve, reject) => {
       const proc = crossSpawn(
@@ -255,13 +259,28 @@ async function forceNpxCache(packageSpec: string): Promise<void> {
         proc.kill();
         reject(new Error("timeout"));
       }, FORCE_CACHE_TIMEOUT_MS);
+      const abort = () => {
+        proc.kill();
+        reject(signal?.reason instanceof Error ? signal.reason : new Error("MCP request aborted"));
+      };
+      signal?.addEventListener("abort", abort, { once: true });
       timer.unref();
-      proc.on("close", () => { clearTimeout(timer); resolve(); });
-      proc.on("error", (err) => { clearTimeout(timer); reject(err); });
+      proc.on("close", () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+        resolve();
+      });
+      proc.on("error", (err) => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+        reject(err);
+      });
     });
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throwIfAborted(signal);
     // Ignore failures, resolution will fall back to original command
   }
+  throwIfAborted(signal);
 }
 
 function buildBinCandidates(packageName: string, explicitBin?: string): string[] {
