@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   markKeepAliveAfterConnect: vi.fn(),
   getFailureAgeSeconds: vi.fn(),
   updateStatusBar: vi.fn(),
+  clearFailure: vi.fn(),
 }));
 
 vi.mock("../mcp-auth-flow.ts", () => ({
@@ -26,6 +27,7 @@ vi.mock("../init.ts", () => ({
   markKeepAliveAfterConnect: mocks.markKeepAliveAfterConnect,
   getFailureAgeSeconds: mocks.getFailureAgeSeconds,
   updateStatusBar: mocks.updateStatusBar,
+  clearFailure: mocks.clearFailure,
 }));
 
 function createState(overrides: Record<string, unknown> = {}) {
@@ -40,6 +42,7 @@ function createState(overrides: Record<string, unknown> = {}) {
     manager: { close: vi.fn(async () => {}) },
     toolMetadata: new Map(),
     failureTracker: new Map([["demo", Date.now()]]),
+    failureMessages: new Map([["demo", "stale failure"]]),
     ...overrides,
   } as any;
 }
@@ -53,6 +56,10 @@ describe("manual OAuth proxy actions", () => {
     });
     mocks.supportsOAuth.mockReset().mockImplementation((definition) => definition.auth === "oauth");
     mocks.updateStatusBar.mockReset();
+    mocks.clearFailure.mockReset().mockImplementation((state: any, serverName: string) => {
+      state.failureTracker.delete(serverName);
+      state.failureMessages?.delete(serverName);
+    });
   });
 
   it("returns copyable instructions and authorization URL", async () => {

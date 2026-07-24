@@ -34,6 +34,7 @@ export interface McpExtensionState {
   config: McpConfig;
   authStorageOptions: AuthStorageOptions;
   failureTracker: Map<string, number>;
+  failureMessages: Map<string, string>;
   uiResourceHandler: UiResourceHandler;
   consentManager: ConsentManager;
   uiServer: UiServerHandle | null;

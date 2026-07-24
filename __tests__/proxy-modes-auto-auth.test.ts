@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
   markKeepAliveAfterConnect: vi.fn(),
   getFailureAgeSeconds: vi.fn(),
   updateStatusBar: vi.fn(),
+  clearFailure: vi.fn(),
+  recordFailure: vi.fn(),
   clients: [] as any[],
   transports: [] as any[],
   connectImpl: vi.fn(),
@@ -29,6 +31,8 @@ vi.mock("../init.ts", () => ({
   markKeepAliveAfterConnect: mocks.markKeepAliveAfterConnect,
   getFailureAgeSeconds: mocks.getFailureAgeSeconds,
   updateStatusBar: mocks.updateStatusBar,
+  clearFailure: mocks.clearFailure,
+  recordFailure: mocks.recordFailure,
 }));
 
 vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
@@ -92,6 +96,8 @@ describe("proxy auto auth", () => {
     mocks.markKeepAliveAfterConnect.mockReset();
     mocks.getFailureAgeSeconds.mockReset().mockReturnValue(null);
     mocks.updateStatusBar.mockReset();
+    mocks.clearFailure.mockReset();
+    mocks.recordFailure.mockReset();
     mocks.clients.length = 0;
     mocks.transports.length = 0;
     mocks.connectImpl.mockReset().mockResolvedValue(undefined);

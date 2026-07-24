@@ -3,7 +3,7 @@ import { UrlElicitationRequiredError } from "@modelcontextprotocol/sdk/types.js"
 import type { McpExtensionState } from "./state.ts";
 import type { DirectToolSpec, McpConfig, McpContent, ToolPrefix } from "./types.ts";
 import type { MetadataCache } from "./metadata-cache.ts";
-import { lazyConnect, getFailureAgeSeconds } from "./init.ts";
+import { lazyConnect, getFailureAgeSeconds, clearFailure } from "./init.ts";
 import { abortable, throwIfAborted } from "./abort.ts";
 import { isServerCacheValid } from "./metadata-cache.ts";
 import { formatSchema } from "./tool-metadata.ts";
@@ -344,7 +344,7 @@ export function createDirectToolExecutor(
       }
       if (autoAuth.status === "success") {
         await state.manager.close(spec.serverName);
-        state.failureTracker.delete(spec.serverName);
+        clearFailure(state, spec.serverName);
         connected = await lazyConnect(state, spec.serverName, signal);
       }
     }
@@ -393,7 +393,7 @@ export function createDirectToolExecutor(
           if (afterAuth?.status === "needs-auth") {
             await state.manager.close(spec.serverName);
           }
-          state.failureTracker.delete(spec.serverName);
+          clearFailure(state, spec.serverName);
           const reconnected = await lazyConnect(state, spec.serverName, signal);
           return reconnected ? state.manager.getConnection(spec.serverName) : undefined;
         }

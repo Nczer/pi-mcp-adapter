@@ -121,6 +121,39 @@ export function resolveBearerToken(definition: Pick<ServerEntry, "bearerToken" |
   return definition.bearerTokenEnv ? process.env[definition.bearerTokenEnv] : undefined;
 }
 
+/** Remove OSC control strings, including payloads that have no terminator. */
+export function stripOscSequences(text: string): string {
+  let result = "";
+  let index = 0;
+  while (index < text.length) {
+    const isEscOsc = text.charCodeAt(index) === 0x1b && text[index + 1] === "]";
+    const isC1Osc = text.charCodeAt(index) === 0x9d;
+    if (!isEscOsc && !isC1Osc) {
+      result += text[index++];
+      continue;
+    }
+
+    index += isEscOsc ? 2 : 1;
+    while (index < text.length) {
+      const code = text.charCodeAt(index++);
+      if (code === 0x07 || code === 0x9c) break;
+      if (code === 0x1b && text[index] === "\\") {
+        index++;
+        break;
+      }
+    }
+  }
+  return result;
+}
+
+export function sanitizeTerminalText(text: string): string {
+  return stripOscSequences(text)
+    .replace(/(?:\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_])/g, "")
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function truncateAtWord(text: string, target: number): string {
   if (!text || text.length <= target) return text;
 
