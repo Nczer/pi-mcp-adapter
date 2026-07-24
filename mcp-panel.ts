@@ -453,26 +453,7 @@ class McpPanel {
     if (matchesKey(data, "ctrl+r")) {
       const item = this.visibleItems[this.cursorIndex];
       if (!item) return;
-      const server = this.servers[item.serverIndex];
-      if (server.connectionStatus === "connecting") return;
-      server.connectionStatus = "connecting";
-      this.callbacks.reconnect(server.name).then(() => {
-        server.connectionStatus = this.callbacks.getConnectionStatus(server.name);
-        if (server.connectionStatus === "connected") {
-          const entry = this.callbacks.refreshCacheAfterReconnect(server.name);
-          if (entry) {
-            this.rebuildServerTools(server, entry);
-          }
-          server.hasCachedData = true;
-        }
-        this.tui.requestRender();
-      }).catch((error) => {
-        server.connectionStatus = "failed";
-        const message = sanitizeDisplayText(error instanceof Error ? error.message : String(error));
-        const serverName = sanitizeDisplayText(server.name);
-        this.authNotice = `Reconnect failed for ${serverName}: ${message}`;
-        this.tui.requestRender();
-      });
+      this.reconnectServer(this.servers[item.serverIndex]);
       return;
     }
 
@@ -510,6 +491,7 @@ class McpPanel {
 
   private authenticateServer(server: ServerState): void {
     if (this.authInFlight) return;
+    if (server.connectionStatus === "connecting") return;
     const serverName = sanitizeDisplayText(server.name);
     if (!this.callbacks.canAuthenticate(server.name)) {
       this.authNotice = `${serverName} does not use OAuth authentication.`;
@@ -522,10 +504,16 @@ class McpPanel {
 
     this.callbacks.authenticate(server.name).then((result) => {
       server.connectionStatus = this.callbacks.getConnectionStatus(server.name);
+      if (result.ok) {
+        this.authNotice = `OAuth finished for ${serverName}. Reconnecting...`;
+        this.authInFlight = null;
+        this.tui.requestRender();
+        this.reconnectServer(server, { afterAuth: true });
+        return;
+      }
+
       const message = sanitizeDisplayText(result.message);
-      this.authNotice = result.ok
-        ? `OAuth finished for ${serverName}. Run reconnect if it is still idle.`
-        : `OAuth failed for ${serverName}${message ? `: ${message}` : ". Check the notification for details."}`;
+      this.authNotice = `OAuth failed for ${serverName}${message ? `: ${message}` : ". Check the notification for details."}`;
       this.authInFlight = null;
       this.tui.requestRender();
     }).catch((error) => {
@@ -533,6 +521,35 @@ class McpPanel {
       server.connectionStatus = this.callbacks.getConnectionStatus(server.name);
       this.authNotice = `OAuth failed for ${serverName}: ${message}`;
       this.authInFlight = null;
+      this.tui.requestRender();
+    });
+  }
+
+  private reconnectServer(server: ServerState, options: { afterAuth?: boolean } = {}): void {
+    if (server.connectionStatus === "connecting") return;
+    const serverName = sanitizeDisplayText(server.name);
+    server.connectionStatus = "connecting";
+    this.tui.requestRender();
+
+    this.callbacks.reconnect(server.name).then((connected) => {
+      server.connectionStatus = this.callbacks.getConnectionStatus(server.name);
+      if (server.connectionStatus === "connected") {
+        const entry = this.callbacks.refreshCacheAfterReconnect(server.name);
+        if (entry) {
+          this.rebuildServerTools(server, entry);
+        }
+        server.hasCachedData = true;
+      }
+      if (options.afterAuth) {
+        this.authNotice = connected && server.connectionStatus === "connected"
+          ? `OAuth finished for ${serverName}. Reconnected.`
+          : `OAuth finished for ${serverName}, but reconnect did not complete. Press ctrl+r to retry.`;
+      }
+      this.tui.requestRender();
+    }).catch((error) => {
+      server.connectionStatus = "failed";
+      const message = sanitizeDisplayText(error instanceof Error ? error.message : String(error));
+      this.authNotice = `Reconnect failed for ${serverName}: ${message}`;
       this.tui.requestRender();
     });
   }

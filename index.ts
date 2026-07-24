@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ToolInfo } from "@earendil-works/pi-coding-agent";
 import type { McpExtensionState } from "./state.ts";
 import { Type } from "typebox";
-import { showStatus, showTools, reconnectServers, authenticateServer, logoutServer, openMcpAuthPanel, openMcpPanel, openMcpSetup } from "./commands.ts";
+import { showStatus, showTools, reconnectServer, reconnectServers, authenticateServer, logoutServer, openMcpAuthPanel, openMcpPanel, openMcpSetup } from "./commands.ts";
 import { loadMcpConfig } from "./config.ts";
 import { buildProxyDescription, createDirectToolExecutor, getMissingConfiguredDirectToolServers, resolveDirectTools } from "./direct-tools.ts";
 import { flushMetadataCache, initializeMcp, updateStatusBar } from "./init.ts";
@@ -256,7 +256,10 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         return;
       }
 
-      await authenticateServer(serverName, state.config, ctx);
+      const result = await authenticateServer(serverName, state.config, ctx);
+      if (result.ok) {
+        await reconnectServer(state, ctx, serverName);
+      }
     },
   });
 

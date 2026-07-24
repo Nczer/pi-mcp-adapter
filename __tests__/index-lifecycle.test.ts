@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   resolveDirectTools: vi.fn(() => []),
   showStatus: vi.fn(),
   showTools: vi.fn(),
+  reconnectServer: vi.fn(),
   reconnectServers: vi.fn(),
   authenticateServer: vi.fn(),
   logoutServer: vi.fn(),
@@ -65,6 +66,7 @@ vi.mock("../direct-tools.ts", () => ({
 vi.mock("../commands.ts", () => ({
   showStatus: mocks.showStatus,
   showTools: mocks.showTools,
+  reconnectServer: mocks.reconnectServer,
   reconnectServers: mocks.reconnectServers,
   authenticateServer: mocks.authenticateServer,
   logoutServer: mocks.logoutServer,
@@ -578,9 +580,10 @@ describe("mcpAdapter session lifecycle", () => {
     expect(mocks.authenticateServer).not.toHaveBeenCalled();
   });
 
-  it("keeps explicit `/mcp-auth <server>` routed to direct authentication", async () => {
+  it("reconnects after explicit `/mcp-auth <server>` succeeds", async () => {
     const state = createState();
     mocks.initializeMcp.mockResolvedValue(state);
+    mocks.authenticateServer.mockResolvedValue({ ok: true });
 
     const { default: mcpAdapter } = await import("../index.ts");
     const { api, handlers } = createPi();
@@ -596,6 +599,30 @@ describe("mcpAdapter session lifecycle", () => {
     await commandDef.handler("github", { hasUI: true, ui });
 
     expect(mocks.authenticateServer).toHaveBeenCalledWith("github", state.config, expect.any(Object));
+    expect(mocks.reconnectServer).toHaveBeenCalledWith(state, expect.any(Object), "github");
+    expect(mocks.openMcpAuthPanel).not.toHaveBeenCalled();
+  });
+
+  it("does not reconnect after explicit `/mcp-auth <server>` fails", async () => {
+    const state = createState();
+    mocks.initializeMcp.mockResolvedValue(state);
+    mocks.authenticateServer.mockResolvedValue({ ok: false });
+
+    const { default: mcpAdapter } = await import("../index.ts");
+    const { api, handlers } = createPi();
+    mcpAdapter(api);
+
+    const ui = { notify: vi.fn() };
+    const sessionStart = handlers.get("session_start");
+    await sessionStart?.({}, { hasUI: true, ui });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const commandDef = api.registerCommand.mock.calls.find((call: any[]) => call[0] === "mcp-auth")?.[1];
+    await commandDef.handler("github", { hasUI: true, ui });
+
+    expect(mocks.authenticateServer).toHaveBeenCalledWith("github", state.config, expect.any(Object));
+    expect(mocks.reconnectServer).not.toHaveBeenCalled();
     expect(mocks.openMcpAuthPanel).not.toHaveBeenCalled();
   });
 
