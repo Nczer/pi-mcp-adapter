@@ -9,6 +9,8 @@ interface RenderTheme {
   bold?: (text: string) => string;
 }
 
+const plainTheme: RenderTheme = { fg: (_name, text) => text };
+
 export interface McpProxyToolCallInput {
   tool?: string;
   args?: string | Record<string, unknown>;
@@ -119,19 +121,20 @@ export function formatMcpDirectToolCallLines(
   return [displayName, formatJsonish(args, maxInputChars)];
 }
 
-function renderToolCallLines(lines: string[], theme: RenderTheme) {
+function renderToolCallLines(lines: string[], theme?: RenderTheme) {
+  const activeTheme = theme ?? plainTheme;
   const [title = "mcp", ...rest] = lines;
-  const styledTitle = theme.fg("toolTitle", theme.bold ? theme.bold(title) : title);
-  const styledRest = rest.map(line => theme.fg("muted", line));
+  const styledTitle = activeTheme.fg("toolTitle", activeTheme.bold ? activeTheme.bold(title) : title);
+  const styledRest = rest.map(line => activeTheme.fg("muted", line));
   return new Text([styledTitle, ...styledRest].join("\n"), 0, 0);
 }
 
-export function renderMcpProxyToolCall(args: McpProxyToolCallInput, theme: RenderTheme) {
+export function renderMcpProxyToolCall(args: McpProxyToolCallInput, theme?: RenderTheme) {
   return renderToolCallLines(formatMcpProxyToolCallLines(args), theme);
 }
 
 export function createMcpDirectToolCallRenderer(displayName: string) {
-  return (args: Record<string, unknown>, theme: RenderTheme) => {
+  return (args: Record<string, unknown>, theme?: RenderTheme) => {
     return renderToolCallLines(formatMcpDirectToolCallLines(displayName, args), theme);
   };
 }
@@ -164,23 +167,24 @@ export function formatMcpToolResultLines(
 export function renderMcpToolResult(
   result: AgentToolResult<McpToolResultDetails>,
   options: ToolRenderResultOptions,
-  theme: RenderTheme,
+  theme?: RenderTheme,
   context?: McpToolRenderContext,
 ) {
+  const activeTheme = theme ?? plainTheme;
   if (options.isPartial) {
-    return new Text(theme.fg("warning", "Running MCP tool..."), 0, 0);
+    return new Text(activeTheme.fg("warning", "Running MCP tool..."), 0, 0);
   }
 
   const hasErrorDetails = Boolean(result.details.error);
   const expanded = options.expanded || context?.isError === true || hasErrorDetails;
   const display = formatMcpToolResultLines(result, true);
-  const output = display.lines.map((line) => theme.fg("toolOutput", line)).join("\n");
+  const output = display.lines.map((line) => activeTheme.fg("toolOutput", line)).join("\n");
 
   return new CollapsibleText(
     output,
     expanded,
     DEFAULT_MAX_COLLAPSED_LINES,
-    theme.fg("muted", "…"),
-    theme.fg("muted", "(Ctrl+O to expand)"),
+    activeTheme.fg("muted", "…"),
+    activeTheme.fg("muted", "(Ctrl+O to expand)"),
   );
 }
