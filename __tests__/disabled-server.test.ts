@@ -228,13 +228,13 @@ describe("disabled MCP servers", () => {
     expect(connect).toHaveBeenCalledWith("enabled", expect.objectContaining({ lifecycle: "eager" }), expect.any(AbortSignal));
   });
 
-  it("keeps no-theme status usable and reports disabled count", () => {
+  it("keeps no-theme status usable", () => {
     const setStatus = vi.fn();
     updateStatusBar({
       ...disabledState(),
       ui: { setStatus, theme: undefined },
     });
-    // Custom branch renders a plain "MCP:" prefix without the plug icon.
-    expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 1 server enabled (1 disabled)");
+    // Custom branch: plain "MCP:" prefix, simple connected/total count (no plug icon, no verbose suffixes).
+    expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 1/2 servers");
   });
 });

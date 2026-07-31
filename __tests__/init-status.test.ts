@@ -18,34 +18,34 @@ describe("formatMcpStatus", () => {
 });
 
 describe("updateStatusBar", () => {
-  it("shows enabled servers instead of active connections as the primary count", () => {
+  it("shows connected/total servers as the status", () => {
     const setStatus = vi.fn();
     const state = createState({ setStatus });
 
     updateStatusBar(state);
 
-    // Custom branch: plain "MCP:" prefix without the plug icon.
-    expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 1 server enabled");
+    // Custom branch: plain "MCP:" prefix, simple connected/total count.
+    expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 0/1 servers");
   });
 
-  it("does not count a needs-auth connection as connected", () => {
+  it("counts tracked connections (incl. needs-auth) toward the connected count", () => {
     const setStatus = vi.fn();
     const state = createState({ setStatus });
     state.manager.getAllConnections.mockReturnValue(new Map([["demo", { status: "needs-auth" }]]));
 
     updateStatusBar(state);
 
-    expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 1 server enabled");
+    expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 1/1 servers");
   });
 
-  it("shows connected servers as secondary state", () => {
+  it("shows connected servers as the count", () => {
     const setStatus = vi.fn();
     const state = createState({ setStatus });
     state.manager.getAllConnections.mockReturnValue(new Map([["demo", { status: "connected" }]]));
 
     updateStatusBar(state);
 
-    expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 1 server enabled (1 connected)");
+    expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 1/1 servers");
   });
 
   it("uses the dim/accent themed status when a theme is available", () => {
@@ -57,17 +57,17 @@ describe("updateStatusBar", () => {
 
     updateStatusBar(state);
 
-    expect(setStatus).toHaveBeenCalledWith("mcp", "styled:· styled:MCP: styled:1 server enabled");
+    expect(setStatus).toHaveBeenCalledWith("mcp", "styled:· styled:MCP: styled:0/1 servers");
   });
 
   it("ignores the showStatusIcon opt-out (custom prefix always wins)", () => {
     const setStatus = vi.fn();
     updateStatusBar(createState({ setStatus }, { showStatusIcon: true }));
 
-    expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 1 server enabled");
+    expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 0/1 servers");
   });
 
-  it("keeps themed dim/accent formatting with connected and disabled suffixes", () => {
+  it("keeps themed dim/accent formatting with disabled servers in the total", () => {
     const setStatus = vi.fn();
     const state = createState({
       setStatus,
@@ -80,7 +80,7 @@ describe("updateStatusBar", () => {
 
     updateStatusBar(state);
 
-    expect(setStatus).toHaveBeenCalledWith("mcp", "styled:· styled:MCP: styled:1 server enabled (1 connected) (1 disabled)");
+    expect(setStatus).toHaveBeenCalledWith("mcp", "styled:· styled:MCP: styled:1/2 servers");
   });
 
   it("can show a compact connected/enabled footer", () => {

@@ -515,20 +515,13 @@ export function updateStatusBar(state: McpExtensionState): void {
   publishMcpStatusSnapshot(state);
   const ui = state.ui;
   if (!ui) return;
-  const entries = Object.entries(state.config.mcpServers);
-  const disabledCount = entries.filter(([, definition]) => isServerDisabled(definition)).length;
-  const enabledCount = entries.length - disabledCount;
-  if (entries.length === 0) {
+  const total = Object.keys(state.config.mcpServers).length;
+  if (total === 0) {
     ui.setStatus("mcp", undefined);
     return;
   }
-  const connectedCount = [...state.manager.getAllConnections()].filter(([name, connection]) => {
-    const definition = state.config.mcpServers[name];
-    return connection.status === "connected" && definition !== undefined && !isServerDisabled(definition);
-  }).length;
-  let status = `${enabledCount} ${enabledCount === 1 ? "server" : "servers"} enabled`;
-  if (connectedCount > 0) status += ` (${connectedCount} connected)`;
-  if (disabledCount > 0) status += ` (${disabledCount} disabled)`;
+  const connectedCount = state.manager.getAllConnections().size;
+  const status = `${connectedCount}/${total} servers`;
   ui.setStatus("mcp", ui.theme
     ? `${ui.theme.fg("dim", "· ")}${ui.theme.fg("accent", "MCP:")} ${ui.theme.fg("dim", status)}`
     : `MCP: ${status}`);
