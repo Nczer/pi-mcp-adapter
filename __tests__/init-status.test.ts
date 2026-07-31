@@ -67,7 +67,7 @@ describe("updateStatusBar", () => {
     expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 0/1 servers");
   });
 
-  it("keeps themed dim/accent formatting with disabled servers in the total", () => {
+  it("excludes disabled servers from the total while keeping dim/accent formatting", () => {
     const setStatus = vi.fn();
     const state = createState({
       setStatus,
@@ -80,7 +80,7 @@ describe("updateStatusBar", () => {
 
     updateStatusBar(state);
 
-    expect(setStatus).toHaveBeenCalledWith("mcp", "styled:· styled:MCP: styled:1/2 servers");
+    expect(setStatus).toHaveBeenCalledWith("mcp", "styled:· styled:MCP: styled:1/1 servers");
   });
 
   it("can show a compact connected/enabled footer", () => {

@@ -235,6 +235,7 @@ describe("disabled MCP servers", () => {
       ui: { setStatus, theme: undefined },
     });
     // Custom branch: plain "MCP:" prefix, simple connected/total count (no plug icon, no verbose suffixes).
-    expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 1/2 servers");
+    // Disabled servers are excluded from the total.
+    expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 1/1 servers");
   });
 });

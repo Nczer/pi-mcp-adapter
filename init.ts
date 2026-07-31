@@ -515,7 +515,7 @@ export function updateStatusBar(state: McpExtensionState): void {
   publishMcpStatusSnapshot(state);
   const ui = state.ui;
   if (!ui) return;
-  const total = Object.keys(state.config.mcpServers).length;
+  const total = Object.entries(state.config.mcpServers).filter(([, definition]) => !isServerDisabled(definition)).length;
   if (total === 0) {
     ui.setStatus("mcp", undefined);
     return;
