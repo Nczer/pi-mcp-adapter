@@ -144,7 +144,11 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       name: spec.prefixedName,
       label: `MCP: ${spec.originalName}`,
       description: spec.description || "(no description)",
-      parameters: Type.Unsafe((spec.inputSchema || { type: "object", properties: {} }) as never),
+      // Raw pass-through (no normalization). Fall back to the plain schema when
+      // the host typebox remap lacks Type.Unsafe.
+      parameters: typeof (Type as { Unsafe?: (value: never) => unknown }).Unsafe === "function"
+        ? Type.Unsafe((spec.inputSchema || { type: "object", properties: {} }) as never)
+        : (spec.inputSchema || { type: "object", properties: {} }),
       execute: createDirectToolExecutor(() => state, () => initPromise, spec),
       renderCall: createMcpDirectToolCallRenderer(spec.prefixedName),
       renderResult: renderMcpToolResult,

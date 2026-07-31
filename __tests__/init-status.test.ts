@@ -24,7 +24,8 @@ describe("updateStatusBar", () => {
 
     updateStatusBar(state);
 
-    expect(setStatus).toHaveBeenCalledWith("mcp", "🔌 MCP: 1 server enabled");
+    // Custom branch: plain "MCP:" prefix without the plug icon.
+    expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 1 server enabled");
   });
 
   it("does not count a needs-auth connection as connected", () => {
@@ -34,7 +35,7 @@ describe("updateStatusBar", () => {
 
     updateStatusBar(state);
 
-    expect(setStatus).toHaveBeenCalledWith("mcp", "🔌 MCP: 1 server enabled");
+    expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 1 server enabled");
   });
 
   it("shows connected servers as secondary state", () => {
@@ -44,10 +45,10 @@ describe("updateStatusBar", () => {
 
     updateStatusBar(state);
 
-    expect(setStatus).toHaveBeenCalledWith("mcp", "🔌 MCP: 1 server enabled (1 connected)");
+    expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 1 server enabled (1 connected)");
   });
 
-  it("keeps themed status text when a theme is available", () => {
+  it("uses the dim/accent themed status when a theme is available", () => {
     const setStatus = vi.fn();
     const state = createState({
       setStatus,
@@ -56,17 +57,17 @@ describe("updateStatusBar", () => {
 
     updateStatusBar(state);
 
-    expect(setStatus).toHaveBeenCalledWith("mcp", "styled:🔌 MCP: 1 server enabled");
+    expect(setStatus).toHaveBeenCalledWith("mcp", "styled:· styled:MCP: styled:1 server enabled");
   });
 
-  it("keeps the icon when explicitly enabled", () => {
+  it("ignores the showStatusIcon opt-out (custom prefix always wins)", () => {
     const setStatus = vi.fn();
     updateStatusBar(createState({ setStatus }, { showStatusIcon: true }));
 
-    expect(setStatus).toHaveBeenCalledWith("mcp", "🔌 MCP: 1 server enabled");
+    expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 1 server enabled");
   });
 
-  it("removes the icon while preserving themed connected and disabled suffixes", () => {
+  it("keeps themed dim/accent formatting with connected and disabled suffixes", () => {
     const setStatus = vi.fn();
     const state = createState({
       setStatus,
@@ -79,7 +80,7 @@ describe("updateStatusBar", () => {
 
     updateStatusBar(state);
 
-    expect(setStatus).toHaveBeenCalledWith("mcp", "styled:MCP: 1 server enabled (1 connected) (1 disabled)");
+    expect(setStatus).toHaveBeenCalledWith("mcp", "styled:· styled:MCP: styled:1 server enabled (1 connected) (1 disabled)");
   });
 
   it("can show a compact connected/enabled footer", () => {

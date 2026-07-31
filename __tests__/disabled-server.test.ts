@@ -234,6 +234,7 @@ describe("disabled MCP servers", () => {
       ...disabledState(),
       ui: { setStatus, theme: undefined },
     });
-    expect(setStatus).toHaveBeenCalledWith("mcp", "🔌 MCP: 1 server enabled (1 disabled)");
+    // Custom branch renders a plain "MCP:" prefix without the plug icon.
+    expect(setStatus).toHaveBeenCalledWith("mcp", "MCP: 1 server enabled (1 disabled)");
   });
 });

@@ -288,7 +288,7 @@ describe("mcpAdapter session lifecycle", () => {
     expect(directTool.parameters).toEqual({ type: "object", properties: { query: { type: "string" } } });
   });
 
-  it("normalizes direct MCP tool schemas before registration", async () => {
+  it("passes direct MCP tool schemas through without normalization", async () => {
     const schema = {
       $schema: "https://json-schema.org/draft/2020-12/schema",
       type: "object",
@@ -316,21 +316,12 @@ describe("mcpAdapter session lifecycle", () => {
     const { api } = createPi();
     mcpAdapter(api);
 
-    expect(mocks.normalizeDirectToolInputSchema).toHaveBeenCalledWith(schema);
+    expect(mocks.normalizeDirectToolInputSchema).not.toHaveBeenCalled();
     const directTool = api.registerTool.mock.calls.find((call: any[]) => call[0].name === "demo_search")?.[0];
-    expect(directTool.parameters).toMatchObject({
-      type: "object",
-      properties: {
-        query: { type: "string" },
-        nested: {
-          type: "object",
-          additionalProperties: false,
-        },
-      },
-      required: ["query"],
-    });
-    expect(directTool.parameters).not.toHaveProperty("$schema");
-    expect(directTool.parameters).not.toHaveProperty("additionalProperties");
+    // Custom branch registers the raw server schema as-is (no normalization).
+    expect(directTool.parameters).toMatchObject(schema);
+    expect(directTool.parameters).toHaveProperty("$schema");
+    expect(directTool.parameters).toHaveProperty("additionalProperties");
   });
 
   it("waits for env-selected cold-cache tools before session startup completes", async () => {
